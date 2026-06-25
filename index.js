@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const app  = express();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-app.use(cors({ origin: "*", methods: ["GET","PUT","POST","PATCH","DELETE"], allowedHeaders: ["Content-Type"] }));
+app.use(cors());
 app.use(express.json());
 
 async function q(sql, params = []) {
@@ -31,7 +31,20 @@ app.get('/api/employees', async (req, res) => {
                WHERE e.is_active = true`;
     const params = [];
     if (dept) { sql += ` AND d.code = $1`; params.push(dept); }
-    sql += ' ORDER BY d.id, CASE e.level WHEN \'top\' THEN 1 WHEN \'mid\' THEN 2 ELSE 3 END, e.name';
+    sql += ` ORDER BY d.id,
+      CASE e.team
+        WHEN 'РОП' THEN 1
+        WHEN 'Команда Чопового' THEN 2
+        WHEN 'Команда Шелковникової' THEN 3
+        WHEN 'Команда Кіндюшенко' THEN 4
+        WHEN 'Нові співробітники' THEN 5
+        WHEN 'Віддалено' THEN 6
+        WHEN 'Гарячі продажі' THEN 7
+        WHEN 'Відмови' THEN 8
+        ELSE 9
+      END,
+      CASE e.role WHEN 'rop' THEN 1 WHEN 'senior' THEN 2 ELSE 3 END,
+      e.name`;
     res.json(await q(sql, params));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
