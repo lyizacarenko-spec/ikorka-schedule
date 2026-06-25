@@ -56,9 +56,10 @@ app.patch('/api/employees/:id', async (req, res) => {
         department_id = COALESCE($2, department_id),
         level = COALESCE($3, level),
         role = COALESCE($4, role),
-        is_active = COALESCE($5, is_active)
+        is_active = COALESCE($5, is_active),
+        team = COALESCE($7, team)
        WHERE id = $6 RETURNING *`,
-      [name, department_id, level, role, is_active, req.params.id]
+      [name, department_id, level, role, is_active, req.params.id, req.body.team||null]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
