@@ -31,20 +31,7 @@ app.get('/api/employees', async (req, res) => {
                WHERE e.is_active = true`;
     const params = [];
     if (dept) { sql += ` AND d.code = $1`; params.push(dept); }
-    sql += ` ORDER BY d.id,
-      CASE e.team
-        WHEN 'РОП' THEN 1
-        WHEN 'Команда Чопового' THEN 2
-        WHEN 'Команда Шелковникової' THEN 3
-        WHEN 'Команда Кіндюшенко' THEN 4
-        WHEN 'Нові співробітники' THEN 5
-        WHEN 'Віддалено' THEN 6
-        WHEN 'Гарячі продажі' THEN 7
-        WHEN 'Відмови' THEN 8
-        ELSE 9
-      END,
-      CASE e.role WHEN 'rop' THEN 1 WHEN 'senior' THEN 2 ELSE 3 END,
-      e.name`;
+    sql += ' ORDER BY d.id, CASE e.level WHEN \'top\' THEN 1 WHEN \'mid\' THEN 2 ELSE 3 END, e.name';
     res.json(await q(sql, params));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -220,7 +207,7 @@ app.get('/api/stats', async (req, res) => {
     const empCounts = await q(`
       SELECT d.id AS dept_id, d.code AS dept_code, e.level, COUNT(*) AS cnt
       FROM employees e JOIN departments d ON d.id = e.department_id
-      WHERE e.is_active = true
+      WHERE e.is_active = true AND e.role != 'rop'
       GROUP BY d.id, d.code, e.level
     `);
 
