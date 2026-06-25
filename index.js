@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const app  = express();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-app.use(cors());
+app.use(cors({ origin: "*", methods: ["GET","PUT","POST","PATCH","DELETE"], allowedHeaders: ["Content-Type"] }));
 app.use(express.json());
 
 async function q(sql, params = []) {
