@@ -57,9 +57,10 @@ app.patch('/api/employees/:id', async (req, res) => {
         level = COALESCE($3, level),
         role = COALESCE($4, role),
         is_active = COALESCE($5, is_active),
-        team = COALESCE($7, team)
+        team = COALESCE($7, team),
+        start_date = COALESCE($8, start_date)
        WHERE id = $6 RETURNING *`,
-      [name, department_id, level, role, is_active, req.params.id, req.body.team||null]
+      [name, department_id, level, role, is_active, req.params.id, req.body.team||null, req.body.start_date||null]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -208,7 +209,7 @@ app.get('/api/stats', async (req, res) => {
     const empCounts = await q(`
       SELECT d.id AS dept_id, d.code AS dept_code, e.level, COUNT(*) AS cnt
       FROM employees e JOIN departments d ON d.id = e.department_id
-      WHERE e.is_active = true AND e.role != 'rop'
+      WHERE e.is_active = true AND e.role != 'rop' AND e.level != 'new'
       GROUP BY d.id, d.code, e.level
     `);
 
