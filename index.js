@@ -2,6 +2,26 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 const { Pool } = require('pg');
+const { google } = require('googleapis');
+
+const SHEET_ID = '1hpf2y3T2VR6CVWXAMOpc6m6smQDShIangZwF6tsohRM';
+const SERVICE_ACCOUNT = {
+  type: 'service_account',
+  project_id: 'ikorka-schedule',
+  private_key_id: process.env.GOOGLE_KEY_ID,
+  private_key: (process.env.GOOGLE_PRIVATE_KEY||'').replace(/\\n/g,'\n'),
+  client_email: 'ikorka-schedule@ikorka-schedule.iam.gserviceaccount.com',
+  client_id: '110402235356036667065',
+  token_uri: 'https://oauth2.googleapis.com/token',
+};
+
+async function getSheetsClient(){
+  const auth = new google.auth.GoogleAuth({
+    credentials: SERVICE_ACCOUNT,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  });
+  return google.sheets({ version: 'v4', auth });
+}
 
 const app  = express();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
@@ -319,6 +339,122 @@ app.put('/api/salary', async (req, res) => {
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// ── GOOGLE SHEETS EXPORT ─────────────────────────────
+// POST /api/export/salary?year=2026&month=7&dept=rzpk
+app.post('/api/export/salary', async (req, res) => {
+  try {
+    const { year, month, dept, sheet_name } = req.body;
+    const y = parseInt(year || new Date().getFullYear());
+    const m = parseInt(month || new Date().getMonth() + 1);
+
+    // Get salary data with employee info
+    let sql = `
+      SELECT e.name, e.level, e.role, d.code AS dept_code, d.name AS dept_name,
+             sc.plan_amount, sc.fact_amount, sc.returns_pct, sc.worked_days,
+             sc.senior_bonus, sc.penalty, sc.note,
+             sc.updated_at
+      FROM salary_calc sc
+      JOIN employees e ON e.id = sc.employee_id
+      JOIN departments d ON d.id = e.department_id
+      WHERE sc.calc_year=$1 AND sc.calc_month=$2 AND e.is_active=true`;
+    const params = [y, m];
+    if(dept){ sql += ' AND d.code=$3'; params.push(dept); }
+    sql += ' ORDER BY d.id, e.name';
+
+    const salaries = await q(sql, params);
+    if(!salaries.length){ return res.json({ok:false,message:'Немає даних ЗП за цей місяць'}); }
+
+    const sheets = await getSheetsClient();
+    const tabName = sheet_name || `ЗП ${m}.${y}`;
+
+    // Try to add new sheet tab
+    try {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: { requests: [{ addSheet: { properties: { title: tabName } } }] }
+      });
+    } catch(e) {
+      // Sheet already exists - ok
+    }
+
+    // Header row
+    const MONTHS = ['','Січень','Лютий','Березень','Квітень','Травень','Червень','Липень','Серпень','Вересень','Жовтень','Листопад','Грудень'];
+    const header = [
+      [`ЗП ${MONTHS[m]} ${y}`,'','','','','','','','','','','',''],
+      ['ІМЯ','Відділ','Рівень','Кол роб.днів','План','Оборот','% повернень','Ставка','Бонус %','% бонус грн','Переробка','Доплата','Штраф','Примітка','РАЗОМ']
+    ];
+
+    // Data rows
+    const NORM_DAYS = 22;
+    const LEVEL = {top:'ТОП',mid:'Мідл',jun:'Джун',new:'Новий'};
+    const dataRows = salaries.map(s => {
+      const ret = parseFloat(s.returns_pct)||0;
+      const retExcess = Math.max(0, ret-6);
+      const retCorr = (s.fact_amount||0)*retExcess/100;
+      const cleanBase = (s.fact_amount||0)-retCorr;
+      const plan = s.plan_amount||0;
+      const pct = plan>0 ? Math.round(cleanBase/plan*100) : 0;
+      const days = s.worked_days||0;
+
+      let rate=0, bonusPct=0;
+      if(s.dept_code==='refuse'){
+        const orders=plan;
+        if(orders>=150){rate=11000;bonusPct=9;}
+        else if(orders>=115){rate=10000;bonusPct=8;}
+        else if(orders>=90){rate=9000;bonusPct=7;}
+        else{rate=0;bonusPct=5;}
+        const fullRate=days>=22&&orders>=90;
+        rate=fullRate?rate:Math.round(rate*days/NORM_DAYS);
+      } else {
+        if(days<15&&pct<80){rate=8000;bonusPct=4;}
+        else if(pct<70){rate=13000;bonusPct=4;}
+        else if(pct<80){rate=13000;bonusPct=4.5;}
+        else if(pct<100){rate=15000;bonusPct=5;}
+        else if(pct<110){rate=15000;bonusPct=6;}
+        else{rate=15000;bonusPct=7;}
+      }
+      const bonus = Math.round(cleanBase*bonusPct/100);
+      const overtime = Math.max(0,days-NORM_DAYS)*(s.dept_code==='refuse'?450:400);
+      const senior = parseFloat(s.senior_bonus)||0;
+      const penalty = parseFloat(s.penalty)||0;
+      const total = rate+bonus+overtime+senior-penalty;
+
+      return [
+        s.name,
+        s.dept_name,
+        LEVEL[s.level]||s.level,
+        days,
+        plan,
+        s.fact_amount||0,
+        ret+'%',
+        rate,
+        bonusPct+'%',
+        bonus,
+        overtime||'',
+        senior||'',
+        penalty||'',
+        s.note||'',
+        total
+      ];
+    });
+
+    const values = [...header, ...dataRows];
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${tabName}!A1`,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values }
+    });
+
+    res.json({ ok: true, message: `Експортовано ${salaries.length} рядків у вкладку "${tabName}"`, tab: tabName });
+  } catch(e) {
+    console.error('Sheets export error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
