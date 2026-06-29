@@ -2,15 +2,16 @@
   "name": "ikorka-schedule-backend",
   "version": "1.0.0",
   "description": "Schedule & Revenue API for IkorkaShop",
-  "main": "src/index.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "googleapis": "^140.0.0",
     "pg": "^8.11.5"
   },
   "devDependencies": {
