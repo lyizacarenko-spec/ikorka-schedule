@@ -308,14 +308,14 @@ app.get('/api/salary', async (req, res) => {
 // PUT /api/salary
 app.put('/api/salary', async (req, res) => {
   try {
-    const { employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days } = req.body;
+    const { employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note } = req.body;
     const rows = await q(
-      `INSERT INTO salary_calc (employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+      `INSERT INTO salary_calc (employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
        ON CONFLICT (employee_id, calc_year, calc_month)
-       DO UPDATE SET plan_amount=$4, fact_amount=$5, returns_pct=$6, worked_days=$7, updated_at=NOW()
+       DO UPDATE SET plan_amount=$4, fact_amount=$5, returns_pct=$6, worked_days=$7, senior_bonus=$8, penalty=$9, note=$10, updated_at=NOW()
        RETURNING *`,
-      [employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct||0, worked_days||0]
+      [employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct||0, worked_days||0, senior_bonus||0, penalty||0, note||null]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
