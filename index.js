@@ -58,10 +58,10 @@ app.get('/api/employees', async (req, res) => {
 
 app.post('/api/employees', async (req, res) => {
   try {
-    const { name, department_id, level, role } = req.body;
+    const { name, department_id, level, role, team } = req.body;
     const rows = await q(
-      `INSERT INTO employees (name, department_id, level, role) VALUES ($1,$2,$3,$4) RETURNING *`,
-      [name, department_id, level || 'mid', role || 'manager']
+      `INSERT INTO employees (name, department_id, level, role, team) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [name, department_id, level || 'mid', role || 'manager', team || null]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
