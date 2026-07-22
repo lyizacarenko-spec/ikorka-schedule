@@ -15,6 +15,12 @@ const SERVICE_ACCOUNT = {
   token_uri: 'https://oauth2.googleapis.com/token',
 };
 
+// ── Групи відділів ───────────────────────────────────────────
+// Продажі — ЗП по % виконання плану
+const SALES_DEPTS = ['rzpk','retail','wholesale','resellers','hot'];
+// Реактивація/Відмови — ЗП по кількості замовлень
+const ORDER_DEPTS = ['refuse','reactivation'];
+
 async function getSheetsClient(){
   const auth = new google.auth.GoogleAuth({
     credentials: SERVICE_ACCOUNT,
@@ -27,7 +33,7 @@ const app  = express();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 async function q(sql, params = []) {
   const { rows } = await pool.query(sql, params);
@@ -38,6 +44,16 @@ app.get('/health', (_, res) => res.json({ ok: true }));
 
 // ── DEPARTMENTS ──────────────────────────────────────────────
 app.get('/api/departments', async (_, res) => {
+  try {
+    res.json(await q(`SELECT * FROM departments
+                      WHERE COALESCE(is_active, true) = true
+                      ORDER BY id`));
+  }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// всі відділи, включно з архівними (для звітів за минулі місяці)
+app.get('/api/departments/all', async (_, res) => {
   try { res.json(await q('SELECT * FROM departments ORDER BY id')); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -72,10 +88,11 @@ app.get('/api/employees/archived', async (req, res) => {
 
 app.post('/api/employees', async (req, res) => {
   try {
-    const { name, department_id, level, role, team } = req.body;
+    const { name, department_id, level, role, team, start_date } = req.body;
     const rows = await q(
-      `INSERT INTO employees (name, department_id, level, role, team) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [name, department_id, level || 'mid', role || 'manager', team || null]
+      `INSERT INTO employees (name, department_id, level, role, team, start_date)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [name, department_id, level || 'mid', role || 'manager', team || null, start_date || null]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -83,7 +100,7 @@ app.post('/api/employees', async (req, res) => {
 
 app.patch('/api/employees/:id', async (req, res) => {
   try {
-    const { name, department_id, level, role, is_active } = req.body;
+    const { name, department_id, level, role, is_active, team, start_date } = req.body;
     const rows = await q(
       `UPDATE employees SET
         name = COALESCE($1, name),
@@ -94,7 +111,7 @@ app.patch('/api/employees/:id', async (req, res) => {
         team = COALESCE($7, team),
         start_date = COALESCE($8, start_date)
        WHERE id = $6 RETURNING *`,
-      [name, department_id, level, role, is_active, req.params.id, req.body.team||null, req.body.start_date||null]
+      [name, department_id, level, role, is_active, req.params.id, team || null, start_date || null]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -132,6 +149,30 @@ app.put('/api/schedule', async (req, res) => {
       [employee_id, entry_date, status, note||null, updated_by||null]
     );
     res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// BULK — масове заповнення графіка (одним запитом)
+app.put('/api/schedule/bulk', async (req, res) => {
+  try {
+    const { entries } = req.body;
+    if (!Array.isArray(entries) || !entries.length) return res.json({ ok: true, count: 0 });
+
+    const vals = [], params = [];
+    entries.forEach((e, i) => {
+      const o = i * 4;
+      vals.push(`($${o+1},$${o+2},$${o+3},$${o+4},NOW())`);
+      params.push(e.employee_id, e.entry_date, e.status, e.note || null);
+    });
+
+    await q(
+      `INSERT INTO schedule_entries (employee_id, entry_date, status, note, updated_at)
+       VALUES ${vals.join(',')}
+       ON CONFLICT (employee_id, entry_date)
+       DO UPDATE SET status=EXCLUDED.status, note=EXCLUDED.note, updated_at=NOW()`,
+      params
+    );
+    res.json({ ok: true, count: entries.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -230,7 +271,6 @@ app.put('/api/plans', async (req, res) => {
 });
 
 // ── STATS: план відділу = сума планів активних менеджерів ────
-// GET /api/stats?year=2025&month=6
 app.get('/api/stats', async (req, res) => {
   try {
     const { year, month } = req.query;
@@ -240,19 +280,20 @@ app.get('/api/stats', async (req, res) => {
     const end   = new Date(y, m, 0).toISOString().slice(0,10);
 
     // Кількість активних менеджерів по рівнях і відділах
+    // РОП, тімлід і керівник не рахуються в план
     const empCounts = await q(`
       SELECT d.id AS dept_id, d.code AS dept_code, e.level, COUNT(*) AS cnt
       FROM employees e JOIN departments d ON d.id = e.department_id
-      WHERE e.is_active = true AND e.role != 'rop' AND e.level != 'new'
+      WHERE e.is_active = true
+        AND e.role NOT IN ('rop','head','teamlead')
+        AND e.level != 'new'
       GROUP BY d.id, d.code, e.level
     `);
 
-    // Плани рівнів
     const plans = await q(`
       SELECT * FROM level_plans
       WHERE plan_year=$1 AND plan_month=$2`, [y, m]);
 
-    // Факт виручки: detail + dept (беремо більший з двох або суму)
     const revDetail = await q(`
       SELECT e.department_id, SUM(rd.amount) AS total
       FROM daily_revenue_detail rd JOIN employees e ON e.id = rd.employee_id
@@ -265,7 +306,6 @@ app.get('/api/stats', async (req, res) => {
       WHERE revenue_date BETWEEN $1 AND $2
       GROUP BY department_id`, [start, end]);
 
-    // Статуси (лікарняні/відпустки) по відділах
     const statusStats = await q(`
       SELECT d.code AS dept_code, se.status, COUNT(*) AS cnt
       FROM schedule_entries se
@@ -274,14 +314,12 @@ app.get('/api/stats', async (req, res) => {
       WHERE se.entry_date BETWEEN $1 AND $2 AND e.is_active = true
       GROUP BY d.code, se.status`, [start, end]);
 
-    // Збираємо по відділах
     const depts = await q('SELECT * FROM departments ORDER BY id');
     const result = depts.map(dept => {
-      // план = сума (кількість_менеджерів_рівня * план_рівня)
       let planTotal = 0;
       const planBreakdown = {};
       ['top','mid','jun'].forEach(lvl => {
-        const empRow = empCounts.find(r => r.dept_id === dept.id && r.level === lvl);
+        const empRow  = empCounts.find(r => r.dept_id === dept.id && r.level === lvl);
         const planRow = plans.find(r => r.department_id === dept.id && r.level === lvl);
         const cnt  = parseInt(empRow?.cnt  || 0);
         const pamt = parseFloat(planRow?.plan_amount || 0);
@@ -289,7 +327,6 @@ app.get('/api/stats', async (req, res) => {
         planTotal += cnt * pamt;
       });
 
-      // факт: беремо detail якщо є, інакше dept
       const detailRow = revDetail.find(r => r.department_id === dept.id);
       const deptRow   = revDept.find(r => r.department_id === dept.id);
       const factTotal = Math.max(
@@ -299,7 +336,6 @@ app.get('/api/stats', async (req, res) => {
 
       const pct = planTotal > 0 ? Math.round(factTotal / planTotal * 100) : 0;
 
-      // статуси
       const statuses = {};
       statusStats.filter(s => s.dept_code === dept.code)
         .forEach(s => { statuses[s.status] = parseInt(s.cnt); });
@@ -320,9 +356,7 @@ app.get('/api/stats', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-
 // ── SALARY ───────────────────────────────────────────
-// GET /api/salary?year=2026&month=6&dept=rzpk
 app.get('/api/salary', async (req, res) => {
   try {
     const { year, month, dept } = req.query;
@@ -339,7 +373,6 @@ app.get('/api/salary', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// PUT /api/salary
 app.put('/api/salary', async (req, res) => {
   try {
     const { employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note } = req.body;
@@ -355,16 +388,13 @@ app.put('/api/salary', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-
 // ── GOOGLE SHEETS EXPORT ─────────────────────────────
-// POST /api/export/salary?year=2026&month=7&dept=rzpk
 app.post('/api/export/salary', async (req, res) => {
   try {
     const { year, month, dept, sheet_name } = req.body;
     const y = parseInt(year || new Date().getFullYear());
     const m = parseInt(month || new Date().getMonth() + 1);
 
-    // Get salary data with employee info
     let sql = `
       SELECT e.name, e.level, e.role, d.code AS dept_code, d.name AS dept_name,
              sc.plan_amount, sc.fact_amount, sc.returns_pct, sc.worked_days,
@@ -384,7 +414,6 @@ app.post('/api/export/salary', async (req, res) => {
     const sheets = await getSheetsClient();
     const tabName = sheet_name || `ЗП ${m}.${y}`;
 
-    // Try to add new sheet tab
     try {
       await sheets.spreadsheets.batchUpdate({
         spreadsheetId: SHEET_ID,
@@ -394,17 +423,16 @@ app.post('/api/export/salary', async (req, res) => {
       // Sheet already exists - ok
     }
 
-    // Header row
     const MONTHS = ['','Січень','Лютий','Березень','Квітень','Травень','Червень','Липень','Серпень','Вересень','Жовтень','Листопад','Грудень'];
     const header = [
       [`ЗП ${MONTHS[m]} ${y}`,'','','','','','','','','','','',''],
       ['ІМЯ','Відділ','Рівень','Кол роб.днів','План','Оборот','% повернень','Ставка','Бонус %','% бонус грн','Переробка','Доплата','Штраф','Примітка','РАЗОМ']
     ];
 
-    // Data rows
     const NORM_DAYS = 22;
     const LEVEL = {top:'ТОП',mid:'Мідл',jun:'Джун',new:'Новий'};
     const dataRows = salaries.map(s => {
+      const isOrderDept = ORDER_DEPTS.includes(s.dept_code);
       const ret = parseFloat(s.returns_pct)||0;
       const retExcess = Math.max(0, ret-6);
       const retCorr = (s.fact_amount||0)*retExcess/100;
@@ -414,7 +442,7 @@ app.post('/api/export/salary', async (req, res) => {
       const days = s.worked_days||0;
 
       let rate=0, bonusPct=0;
-      if(s.dept_code==='refuse'){
+      if(isOrderDept){
         const orders=plan;
         if(orders>=150){rate=11000;bonusPct=9;}
         else if(orders>=115){rate=10000;bonusPct=8;}
@@ -431,7 +459,7 @@ app.post('/api/export/salary', async (req, res) => {
         else{rate=15000;bonusPct=7;}
       }
       const bonus = Math.round(cleanBase*bonusPct/100);
-      const overtime = Math.max(0,days-NORM_DAYS)*(s.dept_code==='refuse'?450:400);
+      const overtime = Math.max(0,days-NORM_DAYS)*(isOrderDept?450:400);
       const senior = parseFloat(s.senior_bonus)||0;
       const penalty = parseFloat(s.penalty)||0;
       const total = rate+bonus+overtime+senior-penalty;
