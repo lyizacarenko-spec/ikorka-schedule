@@ -618,6 +618,40 @@ async function warehouseMonthTotal(employeeId, y, m) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// СКЛАД — вантажники (почасова, ставка у base_rate, за замовч. 150/год)
+// ═══════════════════════════════════════════════════════════
+app.get('/api/hourly/daily', async (req, res) => {
+  try {
+    const { year, month, employee_id } = req.query;
+    const y = parseInt(year || new Date().getFullYear());
+    const m = parseInt(month || new Date().getMonth() + 1);
+    const start = `${y}-${String(m).padStart(2,'0')}-01`;
+    const end   = new Date(y, m, 0).toISOString().slice(0,10);
+    let sql = `SELECT * FROM hourly_daily WHERE work_date BETWEEN $1 AND $2`;
+    const params = [start, end];
+    if (employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(employee_id)); }
+    sql += ` ORDER BY work_date`;
+    const rows = await q(sql, params);
+    res.json(rows.map(r => ({ ...r, work_date: String(r.work_date).slice(0,10) })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/hourly/daily', async (req, res) => {
+  try {
+    const { employee_id, work_date, hours } = req.body;
+    const rows = await q(
+      `INSERT INTO hourly_daily (employee_id, work_date, hours, updated_at)
+       VALUES ($1,$2,$3,NOW())
+       ON CONFLICT (employee_id, work_date)
+       DO UPDATE SET hours=$3, updated_at=NOW() RETURNING *`,
+      [employee_id, work_date, hours || 0]
+    );
+    const r = rows[0];
+    res.json({ ...r, work_date: String(r.work_date).slice(0,10) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════
 // РУШІЙ РОЗРАХУНКУ ЗП (ставочник fixed_rate)
 // Ціна дня ЗАВЖДИ = оклад / 22.
 // Еталон ("скільки днів мало бути") залежить від norm_type:
@@ -767,6 +801,12 @@ app.get('/api/finance', async (req, res) => {
     const whByEmp = {};
     whRows.forEach(r => { (whByEmp[r.employee_id] = whByEmp[r.employee_id] || []).push(r); });
 
+    // склад — години вантажників
+    const hrRows = await q(
+      `SELECT * FROM hourly_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
+    const hrByEmp = {};
+    hrRows.forEach(r => { (hrByEmp[r.employee_id] = hrByEmp[r.employee_id] || []).push(r); });
+
     const rows = emps.map(emp => {
       // склад-відрядник: сума за днями
       if (emp.scheme_type === 'piece_warehouse') {
@@ -782,6 +822,26 @@ app.get('/api/finance', async (req, res) => {
           scheme_type: 'piece_warehouse',
           base_rate: 0, worked_days: list.length, diff_days: 0,
           piece_total: whTotal,
+          adj_total: adjTotal, adjustments: adjList,
+          total, advance: 0, remainder: total,
+        };
+      }
+      // вантажник: години × ставка
+      if (emp.scheme_type === 'hourly') {
+        const rate = parseFloat(emp.base_rate) || 150;
+        const list = hrByEmp[emp.id] || [];
+        let hours = 0; list.forEach(r => hours += parseFloat(r.hours) || 0);
+        const hourPay = hours * rate;
+        const adjList = adjByEmp[emp.id] || [];
+        const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        const total = hourPay + adjTotal;
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: 'hourly',
+          base_rate: rate, worked_days: list.length, diff_days: 0,
+          hours_total: hours, hour_pay: hourPay,
           adj_total: adjTotal, adjustments: adjList,
           total, advance: 0, remainder: total,
         };
