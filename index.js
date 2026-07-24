@@ -527,7 +527,41 @@ app.put('/api/salary-schemes', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// РУШІЙ РОЗРАХУНКУ ЗП (ставочник fixed_rate)
+// SALARY ADJUSTMENTS (корегування ЗП: премії, доплати, штрафи…)
+// ═══════════════════════════════════════════════════════════
+app.get('/api/salary-adjustments', async (req, res) => {
+  try {
+    const { employee_id, year, month } = req.query;
+    const y = parseInt(year || new Date().getFullYear());
+    const m = parseInt(month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM salary_adjustments WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(employee_id)); }
+    sql += ` ORDER BY created_at`;
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/salary-adjustments', async (req, res) => {
+  try {
+    const { employee_id, calc_year, calc_month, type, amount, comment } = req.body;
+    const rows = await q(
+      `INSERT INTO salary_adjustments (employee_id, calc_year, calc_month, type, amount, comment)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [employee_id, calc_year, calc_month, type || 'інше', amount || 0, comment || null]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/salary-adjustments/:id', async (req, res) => {
+  try {
+    await q(`DELETE FROM salary_adjustments WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
 // Ціна дня ЗАВЖДИ = оклад / 22.
 // Еталон ("скільки днів мало бути") залежить від norm_type:
 //   'fixed'          → завжди 22 (логісти). >22 доплата, <22 вирахування.
@@ -580,7 +614,7 @@ function monthWeekdays(year, month) {
   return c;
 }
 
-function computeFixedRate(scheme, entries, salRow, y, m) {
+function computeFixedRate(scheme, entries, salRow, y, m, adjustments) {
   const base = parseFloat(scheme.base_rate) || 0;
   const normType = scheme.norm_type || 'fixed';
   const dayPrice = base / 22;                        // ціна дня завжди /22
@@ -597,10 +631,11 @@ function computeFixedRate(scheme, entries, salRow, y, m) {
   const diff = worked - targetDays;                 // + переробка / − недопрацював
   const dayAdjust = diff * dayPrice;
 
-  const bonus   = parseFloat(salRow?.bonus_manual) || 0;
-  const penalty = parseFloat(salRow?.penalty) || 0;
+  // корегування (зі знаком): сума всіх рядків
+  const adjList = adjustments || [];
+  const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
 
-  const total = base + dayAdjust + bonus - penalty;
+  const total = base + dayAdjust + adjTotal;
   const advance = base / 2;
 
   return {
@@ -612,7 +647,8 @@ function computeFixedRate(scheme, entries, salRow, y, m) {
     worked_days: worked,
     diff_days: diff,
     day_adjust: dayAdjust,
-    bonus, penalty,
+    adj_total: adjTotal,
+    adjustments: adjList,
     total,
     advance,
     remainder: total - advance,
@@ -662,6 +698,12 @@ app.get('/api/finance', async (req, res) => {
     const salByEmp = {};
     sal.forEach(s => { salByEmp[s.employee_id] = s; });
 
+    // корегування ЗП за місяць
+    const adjs = await q(
+      `SELECT * FROM salary_adjustments WHERE calc_year=$1 AND calc_month=$2 ORDER BY created_at`, [y, m]);
+    const adjByEmp = {};
+    adjs.forEach(a => { (adjByEmp[a.employee_id] = adjByEmp[a.employee_id] || []).push(a); });
+
     const rows = emps.map(emp => {
       const scheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
       const hasScheme = emp.scheme_type === 'fixed_rate' && emp.base_rate > 0;
@@ -677,7 +719,7 @@ app.get('/api/finance', async (req, res) => {
       }
       const calc = computeFixedRate(scheme,
         buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date),
-        salByEmp[emp.id], y, m);
+        salByEmp[emp.id], y, m, adjByEmp[emp.id]);
       return {
         employee_id: emp.id, name: emp.name,
         dept_code: emp.dept_code, dept_name: emp.dept_name,
@@ -755,13 +797,15 @@ app.get('/api/finance/average', async (req, res) => {
       });
       const sal = await q(`SELECT * FROM salary_calc WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
       const salByEmp = {}; sal.forEach(s => salByEmp[s.employee_id] = s);
+      const adjs = await q(`SELECT * FROM salary_adjustments WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+      const adjByEmp = {}; adjs.forEach(a => { (adjByEmp[a.employee_id] = adjByEmp[a.employee_id] || []).push(a); });
 
       emps.forEach(emp => {
         if (idFilter && !idFilter.includes(emp.id)) return;
         if (exclude_new && (emp.level === 'new')) return;
         const calc = computeFixedRate({ base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type },
                                       buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date),
-                                      salByEmp[emp.id], y, m);
+                                      salByEmp[emp.id], y, m, adjByEmp[emp.id]);
         const rec = perEmp[emp.id] = perEmp[emp.id] || { employee_id: emp.id, name: emp.name, dept_name: emp.dept_name, months: {}, sum: 0, n: 0 };
         rec.months[`${y}-${String(m).padStart(2,'0')}`] = calc.total;
         rec.sum += calc.total; rec.n += 1;
