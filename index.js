@@ -603,6 +603,7 @@ app.get('/api/finance', async (req, res) => {
     let empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date,
                          d.id AS dept_id, d.code AS dept_code, d.name AS dept_name,
                          s.scheme_type, s.base_rate, s.norm_days, s.norm_type
+                  FROM employees e
                   JOIN departments d ON d.id = e.department_id
                   LEFT JOIN salary_schemes s ON s.employee_id = e.id
                   WHERE e.is_active = true`;
@@ -703,6 +704,7 @@ app.get('/api/finance/average', async (req, res) => {
       const end   = new Date(y, m, 0).toISOString().slice(0,10);
       let empSql = `SELECT e.id, e.name, e.level, e.start_date, d.code AS dept_code, d.name AS dept_name,
                            s.scheme_type, s.base_rate, s.norm_days, s.norm_type
+                    FROM employees e
                     JOIN departments d ON d.id = e.department_id
                     LEFT JOIN salary_schemes s ON s.employee_id = e.id
                     WHERE e.is_active = true AND s.scheme_type='fixed_rate' AND s.base_rate>0`;
