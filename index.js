@@ -761,7 +761,31 @@ app.get('/api/finance', async (req, res) => {
     const adjByEmp = {};
     adjs.forEach(a => { (adjByEmp[a.employee_id] = adjByEmp[a.employee_id] || []).push(a); });
 
+    // склад — всі щоденні дані за місяць
+    const whRows = await q(
+      `SELECT * FROM warehouse_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
+    const whByEmp = {};
+    whRows.forEach(r => { (whByEmp[r.employee_id] = whByEmp[r.employee_id] || []).push(r); });
+
     const rows = emps.map(emp => {
+      // склад-відрядник: сума за днями
+      if (emp.scheme_type === 'piece_warehouse') {
+        const list = whByEmp[emp.id] || [];
+        let whTotal = 0; list.forEach(r => whTotal += warehouseDayAmount(r).total);
+        const adjList = adjByEmp[emp.id] || [];
+        const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        const total = whTotal + adjTotal;
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: 'piece_warehouse',
+          base_rate: 0, worked_days: list.length, diff_days: 0,
+          piece_total: whTotal,
+          adj_total: adjTotal, adjustments: adjList,
+          total, advance: 0, remainder: total,
+        };
+      }
       const scheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
       const hasScheme = emp.scheme_type === 'fixed_rate' && emp.base_rate > 0;
       if (!hasScheme) {
