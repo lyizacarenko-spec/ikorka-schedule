@@ -561,7 +561,64 @@ app.delete('/api/salary-adjustments/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ═══════════════════════════════════════════════════════════
+// СКЛАД — відрядники (упаковка + фасовка + вихід)
+// Тарифи упаковки: 6/7/8/9 грн; фасовка: скло 1 грн, пластик 1.5 грн
+// День = pack6*6+pack7*7+pack8*8+pack9*9 + glass*1+plastic*1.5 + exit_rate
+// ═══════════════════════════════════════════════════════════
+function warehouseDayAmount(r) {
+  const p = (r.pack6||0)*6 + (r.pack7||0)*7 + (r.pack8||0)*8 + (r.pack9||0)*9;
+  const f = (r.glass||0)*1 + (r.plastic||0)*1.5;
+  const exit = r.exit_rate == null ? 300 : (parseInt(r.exit_rate) || 0);
+  return { pack: p, fasovka: f, exit, total: p + f + exit };
+}
 
+app.get('/api/warehouse/daily', async (req, res) => {
+  try {
+    const { year, month, employee_id } = req.query;
+    const y = parseInt(year || new Date().getFullYear());
+    const m = parseInt(month || new Date().getMonth() + 1);
+    const start = `${y}-${String(m).padStart(2,'0')}-01`;
+    const end   = new Date(y, m, 0).toISOString().slice(0,10);
+    let sql = `SELECT * FROM warehouse_daily WHERE work_date BETWEEN $1 AND $2`;
+    const params = [start, end];
+    if (employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(employee_id)); }
+    sql += ` ORDER BY work_date`;
+    const rows = await q(sql, params);
+    res.json(rows.map(r => ({ ...r, work_date: String(r.work_date).slice(0,10), calc: warehouseDayAmount(r) })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/warehouse/daily', async (req, res) => {
+  try {
+    const { employee_id, work_date, pack6, pack7, pack8, pack9, glass, plastic, exit_rate } = req.body;
+    const rows = await q(
+      `INSERT INTO warehouse_daily (employee_id, work_date, pack6, pack7, pack8, pack9, glass, plastic, exit_rate, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+       ON CONFLICT (employee_id, work_date)
+       DO UPDATE SET pack6=$3, pack7=$4, pack8=$5, pack9=$6, glass=$7, plastic=$8, exit_rate=$9, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, work_date, pack6||0, pack7||0, pack8||0, pack9||0, glass||0, plastic||0, exit_rate==null?300:exit_rate]
+    );
+    const r = rows[0];
+    res.json({ ...r, work_date: String(r.work_date).slice(0,10), calc: warehouseDayAmount(r) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// сума за місяць по відряднику
+async function warehouseMonthTotal(employeeId, y, m) {
+  const start = `${y}-${String(m).padStart(2,'0')}-01`;
+  const end   = new Date(y, m, 0).toISOString().slice(0,10);
+  const rows = await q(
+    `SELECT * FROM warehouse_daily WHERE employee_id=$1 AND work_date BETWEEN $2 AND $3`,
+    [employeeId, start, end]);
+  let total = 0, days = 0;
+  rows.forEach(r => { total += warehouseDayAmount(r).total; days += 1; });
+  return { total, days };
+}
+
+// ═══════════════════════════════════════════════════════════
+// РУШІЙ РОЗРАХУНКУ ЗП (ставочник fixed_rate)
 // Ціна дня ЗАВЖДИ = оклад / 22.
 // Еталон ("скільки днів мало бути") залежить від norm_type:
 //   'fixed'          → завжди 22 (логісти). >22 доплата, <22 вирахування.
