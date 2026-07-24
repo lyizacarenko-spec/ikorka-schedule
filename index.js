@@ -375,14 +375,14 @@ app.get('/api/salary', async (req, res) => {
 
 app.put('/api/salary', async (req, res) => {
   try {
-    const { employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note } = req.body;
+    const { employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual } = req.body;
     const rows = await q(
-      `INSERT INTO salary_calc (employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+      `INSERT INTO salary_calc (employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
        ON CONFLICT (employee_id, calc_year, calc_month)
-       DO UPDATE SET plan_amount=$4, fact_amount=$5, returns_pct=$6, worked_days=$7, senior_bonus=$8, penalty=$9, note=$10, updated_at=NOW()
+       DO UPDATE SET plan_amount=$4, fact_amount=$5, returns_pct=$6, worked_days=$7, senior_bonus=$8, penalty=$9, note=$10, bonus_manual=$11, updated_at=NOW()
        RETURNING *`,
-      [employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct||0, worked_days||0, senior_bonus||0, penalty||0, note||null]
+      [employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct||0, worked_days||0, senior_bonus||0, penalty||0, note||null, bonus_manual||0]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -497,6 +497,257 @@ app.post('/api/export/salary', async (req, res) => {
     console.error('Sheets export error:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ═══════════════════════════════════════════════════════════
+// SALARY SCHEMES (оклади ставочників)
+// ═══════════════════════════════════════════════════════════
+app.get('/api/salary-schemes', async (_, res) => {
+  try {
+    res.json(await q(`SELECT s.*, e.name AS emp_name, d.code AS dept_code
+                      FROM salary_schemes s
+                      JOIN employees e ON e.id = s.employee_id
+                      JOIN departments d ON d.id = e.department_id`));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/salary-schemes', async (req, res) => {
+  try {
+    const { employee_id, scheme_type, base_rate, norm_days, norm_type } = req.body;
+    const rows = await q(
+      `INSERT INTO salary_schemes (employee_id, scheme_type, base_rate, norm_days, norm_type, updated_at)
+       VALUES ($1,$2,$3,$4,$5,NOW())
+       ON CONFLICT (employee_id)
+       DO UPDATE SET scheme_type=$2, base_rate=$3, norm_days=$4, norm_type=$5, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, scheme_type || 'fixed_rate', base_rate || 0, norm_days || 22, norm_type || 'fixed']
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════
+// РУШІЙ РОЗРАХУНКУ ЗП (ставочник fixed_rate)
+// Ціна дня ЗАВЖДИ = оклад / 22.
+// Еталон ("скільки днів мало бути") залежить від norm_type:
+//   'fixed'          → завжди 22 (логісти). >22 доплата, <22 вирахування.
+//   'month_workdays' → будні цього місяця (адмінка, бухгалтерія).
+//                      відпрацював усі будні місяця = повна ставка,
+//                      навіть якщо їх 20 (лютий) чи 23.
+// Відпрацьована зміна = робочий статус (10-18, 8:30-16:30, удаленка, запізн, відробіт…).
+// вих / больн / відпуск / навч — НЕ зміни.
+// ═══════════════════════════════════════════════════════════
+const WORK_STATUSES = ['10-18','11-18','10-17','9:30-17:30','9-17','9-18','8:30-16:30','удаленка','запізн','відробіт'];
+
+// кількість будніх днів (пн-пт) у місяці
+function monthWeekdays(year, month) {
+  const n = new Date(year, month, 0).getDate();
+  let c = 0;
+  for (let d = 1; d <= n; d++) {
+    const dow = new Date(year, month - 1, d).getDay();
+    if (dow !== 0 && dow !== 6) c++;
+  }
+  return c;
+}
+
+function computeFixedRate(scheme, entries, salRow, y, m) {
+  const base = parseFloat(scheme.base_rate) || 0;
+  const normType = scheme.norm_type || 'fixed';
+  const dayPrice = base / 22;                        // ціна дня завжди /22
+
+  // еталон днів
+  const targetDays = normType === 'month_workdays'
+    ? monthWeekdays(y, m)
+    : (parseInt(scheme.norm_days) || 22);
+
+  // відпрацьовані зміни за графіком
+  let worked = 0;
+  entries.forEach(e => { if (WORK_STATUSES.includes(e.status)) worked += 1; });
+
+  const diff = worked - targetDays;                 // + переробка / − недопрацював
+  const dayAdjust = diff * dayPrice;
+
+  const bonus   = parseFloat(salRow?.bonus_manual) || 0;
+  const penalty = parseFloat(salRow?.penalty) || 0;
+
+  const total = base + dayAdjust + bonus - penalty;
+  const advance = base / 2;
+
+  return {
+    scheme_type: 'fixed_rate',
+    norm_type: normType,
+    base_rate: base,
+    day_price: dayPrice,
+    target_days: targetDays,
+    worked_days: worked,
+    diff_days: diff,
+    day_adjust: dayAdjust,
+    bonus, penalty,
+    total,
+    advance,
+    remainder: total - advance,
+  };
+}
+
+// GET /api/finance?year=2026&month=9[&dept=admin]
+// Повертає порахований підсумок ЗП по кожному ставочнику + агрегати по відділах
+app.get('/api/finance', async (req, res) => {
+  try {
+    const { year, month, dept } = req.query;
+    const y = parseInt(year || new Date().getFullYear());
+    const m = parseInt(month || new Date().getMonth() + 1);
+    const start = `${y}-${String(m).padStart(2,'0')}-01`;
+    const end   = new Date(y, m, 0).toISOString().slice(0,10);
+
+    // всі активні співробітники зі схемою fixed_rate
+    let empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date,
+                         d.id AS dept_id, d.code AS dept_code, d.name AS dept_name,
+                         s.scheme_type, s.base_rate, s.norm_days, s.norm_type
+                  JOIN departments d ON d.id = e.department_id
+                  LEFT JOIN salary_schemes s ON s.employee_id = e.id
+                  WHERE e.is_active = true`;
+    const params = [];
+    if (dept) { empSql += ` AND d.code = $1`; params.push(dept); }
+    empSql += ` ORDER BY d.id, e.name`;
+    const emps = await q(empSql, params);
+
+    // графік за місяць
+    const sched = await q(
+      `SELECT se.employee_id, se.entry_date, se.status
+       FROM schedule_entries se
+       JOIN employees e ON e.id = se.employee_id
+       WHERE se.entry_date BETWEEN $1 AND $2 AND e.is_active = true`,
+      [start, end]
+    );
+    const schedByEmp = {};
+    sched.forEach(r => {
+      (schedByEmp[r.employee_id] = schedByEmp[r.employee_id] || [])
+        .push({ entry_date: r.entry_date.toISOString ? r.entry_date.toISOString().slice(0,10) : String(r.entry_date).slice(0,10), status: r.status });
+    });
+
+    // збережені ручні дані (премія/штраф)
+    const sal = await q(
+      `SELECT * FROM salary_calc WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+    const salByEmp = {};
+    sal.forEach(s => { salByEmp[s.employee_id] = s; });
+
+    const rows = emps.map(emp => {
+      const scheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
+      const hasScheme = emp.scheme_type === 'fixed_rate' && emp.base_rate > 0;
+      if (!hasScheme) {
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: emp.scheme_type || null,
+          total: null, advance: null, remainder: null,
+          note: emp.scheme_type ? 'інша схема' : 'оклад не задано',
+        };
+      }
+      const calc = computeFixedRate(scheme, schedByEmp[emp.id] || [], salByEmp[emp.id], y, m);
+      return {
+        employee_id: emp.id, name: emp.name,
+        dept_code: emp.dept_code, dept_name: emp.dept_name,
+        role: emp.role, level: emp.level,
+        start_date: emp.start_date,
+        ...calc,
+      };
+    });
+
+    // агрегати по відділах (лише ті, у кого порахувалось)
+    const deptAgg = {};
+    rows.forEach(r => {
+      if (r.total == null) return;
+      const a = deptAgg[r.dept_code] = deptAgg[r.dept_code] || {
+        dept_code: r.dept_code, dept_name: r.dept_name,
+        count: 0, sum: 0, min: Infinity, max: -Infinity,
+      };
+      a.count += 1; a.sum += r.total;
+      a.min = Math.min(a.min, r.total);
+      a.max = Math.max(a.max, r.total);
+    });
+    const depts = Object.values(deptAgg).map(a => ({
+      ...a,
+      avg: a.count ? a.sum / a.count : 0,
+      min: a.min === Infinity ? 0 : a.min,
+      max: a.max === -Infinity ? 0 : a.max,
+    }));
+
+    res.json({ year: y, month: m, rows, depts });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/finance/average?dept=admin&from=2026-06&to=2026-09[&exclude_new=1]
+// Середня ЗП по відділу за діапазон місяців
+app.get('/api/finance/average', async (req, res) => {
+  try {
+    const { dept, from, to, exclude_new, employee_ids } = req.query;
+    if (!from || !to) return res.status(400).json({ error: 'from/to required (YYYY-MM)' });
+    const [fy, fm] = from.split('-').map(Number);
+    const [ty, tm] = to.split('-').map(Number);
+
+    // перелік місяців у діапазоні
+    const months = [];
+    let yy = fy, mm = fm;
+    while (yy < ty || (yy === ty && mm <= tm)) {
+      months.push({ y: yy, m: mm });
+      mm++; if (mm > 12) { mm = 1; yy++; }
+    }
+
+    const idFilter = employee_ids ? employee_ids.split(',').map(Number) : null;
+
+    // рахуємо кожен місяць через ту саму логіку
+    const perEmp = {}; // employee_id -> {name, dept, months:{'YYYY-MM':total}}
+    for (const { y, m } of months) {
+      const start = `${y}-${String(m).padStart(2,'0')}-01`;
+      const end   = new Date(y, m, 0).toISOString().slice(0,10);
+      let empSql = `SELECT e.id, e.name, e.level, e.start_date, d.code AS dept_code, d.name AS dept_name,
+                           s.scheme_type, s.base_rate, s.norm_days, s.norm_type
+                    JOIN departments d ON d.id = e.department_id
+                    LEFT JOIN salary_schemes s ON s.employee_id = e.id
+                    WHERE e.is_active = true AND s.scheme_type='fixed_rate' AND s.base_rate>0`;
+      const params = [];
+      if (dept) { empSql += ` AND d.code=$${params.length+1}`; params.push(dept); }
+      const emps = await q(empSql, params);
+
+      const sched = await q(
+        `SELECT se.employee_id, se.entry_date, se.status
+         FROM schedule_entries se
+         WHERE se.entry_date BETWEEN $1 AND $2`, [start, end]);
+      const schedByEmp = {};
+      sched.forEach(r => {
+        (schedByEmp[r.employee_id] = schedByEmp[r.employee_id] || [])
+          .push({ entry_date: String(r.entry_date).slice(0,10), status: r.status });
+      });
+      const sal = await q(`SELECT * FROM salary_calc WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+      const salByEmp = {}; sal.forEach(s => salByEmp[s.employee_id] = s);
+
+      emps.forEach(emp => {
+        if (idFilter && !idFilter.includes(emp.id)) return;
+        if (exclude_new && (emp.level === 'new')) return;
+        const calc = computeFixedRate({ base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type },
+                                      schedByEmp[emp.id] || [], salByEmp[emp.id], y, m);
+        const rec = perEmp[emp.id] = perEmp[emp.id] || { employee_id: emp.id, name: emp.name, dept_name: emp.dept_name, months: {}, sum: 0, n: 0 };
+        rec.months[`${y}-${String(m).padStart(2,'0')}`] = calc.total;
+        rec.sum += calc.total; rec.n += 1;
+      });
+    }
+
+    const people = Object.values(perEmp).map(r => ({
+      ...r, avg: r.n ? r.sum / r.n : 0,
+    }));
+    const grandSum = people.reduce((a, p) => a + p.sum, 0);
+    const grandN   = people.reduce((a, p) => a + p.n, 0);
+
+    res.json({
+      dept: dept || 'all',
+      from, to,
+      months: months.map(x => `${x.y}-${String(x.m).padStart(2,'0')}`),
+      people,
+      avg_per_person_month: grandN ? grandSum / grandN : 0,   // середня місячна на людину
+      people_count: people.length,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 const PORT = process.env.PORT || 3000;
