@@ -539,6 +539,36 @@ app.put('/api/salary-schemes', async (req, res) => {
 // ═══════════════════════════════════════════════════════════
 const WORK_STATUSES = ['10-18','11-18','10-17','9:30-17:30','9-17','9-18','8:30-16:30','удаленка','запізн','відробіт'];
 
+// Дефолтний статус за кодом відділу і днем тижня (дзеркало фронтенду)
+function defaultStatusFor(deptCode, dow, empName) {
+  if (['refuse','reactivation'].includes(deptCode)) return '9:30-17:30';
+  if (deptCode === 'admin' && empName === 'Мединська Ірина')
+    return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
+  if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
+  if (deptCode === 'warehouse') return '9-18';
+  if (deptCode === 'logistics') return dow === 0 ? 'вих' : '8:30-16:30';
+  if (['management','training','admin'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
+  return '10-18';
+}
+
+// Побудувати повний місяць статусів: збережені + дефолти для порожніх
+function buildMonthEntries(y, m, savedEntries, deptCode, empName, startDate) {
+  const saved = {};
+  (savedEntries || []).forEach(e => { saved[String(e.entry_date).slice(0,10)] = e.status; });
+  const n = new Date(y, m, 0).getDate();
+  const out = [];
+  for (let d = 1; d <= n; d++) {
+    const date = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const dow = new Date(y, m - 1, d).getDay();
+    let status;
+    if (date in saved) status = saved[date];
+    else if (startDate && date < String(startDate).slice(0,10)) status = '';       // до старту порожньо
+    else status = defaultStatusFor(deptCode, dow, empName);
+    out.push({ entry_date: date, status });
+  }
+  return out;
+}
+
 // кількість будніх днів (пн-пт) у місяці
 function monthWeekdays(year, month) {
   const n = new Date(year, month, 0).getDate();
@@ -645,7 +675,9 @@ app.get('/api/finance', async (req, res) => {
           note: emp.scheme_type ? 'інша схема' : 'оклад не задано',
         };
       }
-      const calc = computeFixedRate(scheme, schedByEmp[emp.id] || [], salByEmp[emp.id], y, m);
+      const calc = computeFixedRate(scheme,
+        buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date),
+        salByEmp[emp.id], y, m);
       return {
         employee_id: emp.id, name: emp.name,
         dept_code: emp.dept_code, dept_name: emp.dept_name,
@@ -728,7 +760,8 @@ app.get('/api/finance/average', async (req, res) => {
         if (idFilter && !idFilter.includes(emp.id)) return;
         if (exclude_new && (emp.level === 'new')) return;
         const calc = computeFixedRate({ base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type },
-                                      schedByEmp[emp.id] || [], salByEmp[emp.id], y, m);
+                                      buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date),
+                                      salByEmp[emp.id], y, m);
         const rec = perEmp[emp.id] = perEmp[emp.id] || { employee_id: emp.id, name: emp.name, dept_name: emp.dept_name, months: {}, sum: 0, n: 0 };
         rec.months[`${y}-${String(m).padStart(2,'0')}`] = calc.total;
         rec.sum += calc.total; rec.n += 1;
