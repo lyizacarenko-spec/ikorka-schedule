@@ -705,6 +705,57 @@ function monthWeekdays(year, month) {
   return c;
 }
 
+// ═══════════════════════════════════════════════════════════
+// РОЗРАХУНОК ЗП: продажі (percent_plan) та відмови (orders_count)
+// Дзеркало фронтового calcSalary. salRow — рядок salary_calc.
+// ═══════════════════════════════════════════════════════════
+function computeSalesSalary(salRow, isOrder) {
+  if (!salRow) return null;
+  const fact = parseFloat(salRow.fact_amount) || 0;
+  const plan = parseFloat(salRow.plan_amount) || 0;
+  const ret  = parseFloat(salRow.returns_pct) || 0;
+  const days = parseInt(salRow.worked_days) || 0;
+  const seniorBonus = parseFloat(salRow.senior_bonus) || 0;
+  const penalty = parseFloat(salRow.penalty) || 0;
+  if (!fact) return null;
+
+  const retExcess = Math.max(0, ret - 6);
+  const retCorrection = fact * retExcess / 100;
+  const cleanBase = fact - retCorrection;
+
+  let rate = 0, bonusPct = 0, total = 0, pct = 0, overtimePay = 0;
+
+  if (isOrder) {
+    const orders = plan;                 // для відмов plan = к-сть замовлень
+    if (orders >= 150) { rate = 11000; bonusPct = 9; }
+    else if (orders >= 115) { rate = 10000; bonusPct = 8; }
+    else if (orders >= 90) { rate = 9000; bonusPct = 7; }
+    else { rate = 0; bonusPct = 5; }
+    const fullRate = days >= 22 && orders >= 90;
+    rate = fullRate ? rate : Math.round(rate * days / 22);
+    const bonus = cleanBase * bonusPct / 100;
+    overtimePay = Math.max(0, days - 22) * 450;
+    total = rate + bonus + overtimePay + seniorBonus - penalty;
+    return { scheme_type:'orders_count', rate, bonus_pct:bonusPct, bonus, orders, clean_base:cleanBase,
+             returns_pct:ret, worked_days:days, overtime:overtimePay, senior_bonus:seniorBonus, penalty,
+             fact, plan, total };
+  } else {
+    pct = plan > 0 ? Math.round(cleanBase / plan * 100) : 0;
+    if (days < 15 && pct < 80) { rate = 8000; bonusPct = 4; }
+    else if (pct < 70) { rate = 13000; bonusPct = 4; }
+    else if (pct < 80) { rate = 13000; bonusPct = 4.5; }
+    else if (pct < 100) { rate = 15000; bonusPct = 5; }
+    else if (pct < 110) { rate = 15000; bonusPct = 6; }
+    else { rate = 15000; bonusPct = 7; }
+    const bonus = cleanBase * bonusPct / 100;
+    overtimePay = Math.max(0, days - 22) * 400;
+    total = rate + bonus + overtimePay + seniorBonus - penalty;
+    return { scheme_type:'percent_plan', rate, bonus_pct:bonusPct, bonus, pct, clean_base:cleanBase,
+             returns_pct:ret, worked_days:days, overtime:overtimePay, senior_bonus:seniorBonus, penalty,
+             fact, plan, total };
+  }
+}
+
 function computeFixedRate(scheme, entries, salRow, y, m, adjustments) {
   const base = parseFloat(scheme.base_rate) || 0;
   const normType = scheme.norm_type || 'fixed';
@@ -847,6 +898,35 @@ app.get('/api/finance', async (req, res) => {
           hours_total: hours, hour_pay: hourPay,
           adj_total: adjTotal, adjustments: adjList,
           total, advance: 0, remainder: total,
+        };
+      }
+      // продажі / відмови: рахуємо із збереженого salary_calc
+      if (SALES_DEPTS.includes(emp.dept_code) || ORDER_DEPTS.includes(emp.dept_code)) {
+        if (['rop','head','teamlead'].includes(emp.role)) {
+          return {
+            employee_id: emp.id, name: emp.name,
+            dept_code: emp.dept_code, dept_name: emp.dept_name,
+            role: emp.role, level: emp.level, scheme_type: 'sales',
+            total: null, advance: null, remainder: null, note: 'керівна роль',
+          };
+        }
+        const isOrder = ORDER_DEPTS.includes(emp.dept_code);
+        const sc = computeSalesSalary(salByEmp[emp.id], isOrder);
+        if (!sc) {
+          return {
+            employee_id: emp.id, name: emp.name,
+            dept_code: emp.dept_code, dept_name: emp.dept_name,
+            role: emp.role, level: emp.level, scheme_type: 'sales',
+            total: null, advance: null, remainder: null, note: 'немає даних ЗП',
+          };
+        }
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: isOrder ? 'orders_count' : 'percent_plan',
+          ...sc,
+          advance: 0, remainder: sc.total,
         };
       }
       const scheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
