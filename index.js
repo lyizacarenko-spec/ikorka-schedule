@@ -976,6 +976,87 @@ app.get('/api/finance', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /api/finance/warehouse-weeks?year=&month=
+// Понедільна розбивка складу (пн-нд, тижні обриваються кінцем місяця).
+// Дата виплати = наступний понеділок після кінця тижня.
+app.get('/api/finance/warehouse-weeks', async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    const daysInMonth = new Date(y, m, 0).getDate();
+
+    // нарізка на тижні пн-нд у межах місяця
+    const weeks = [];
+    let d = 1;
+    while (d <= daysInMonth) {
+      const startDay = d;
+      // знайти найближчу неділю (dow=0) або кінець місяця
+      let endDay = d;
+      while (endDay < daysInMonth) {
+        const dow = new Date(y, m - 1, endDay).getDay();
+        if (dow === 0) break;         // неділя — кінець тижня
+        endDay++;
+      }
+      weeks.push({ startDay, endDay });
+      d = endDay + 1;
+    }
+
+    // склад-співробітники (piece_warehouse + hourly)
+    const emps = await q(
+      `SELECT e.id, e.name, s.scheme_type, s.base_rate
+       FROM employees e
+       JOIN salary_schemes s ON s.employee_id = e.id
+       WHERE e.is_active = true AND s.scheme_type IN ('piece_warehouse','hourly')
+       ORDER BY e.name`);
+
+    const start = `${y}-${String(m).padStart(2,'0')}-01`;
+    const end   = `${y}-${String(m).padStart(2,'0')}-${String(daysInMonth).padStart(2,'0')}`;
+    const wh = await q(`SELECT * FROM warehouse_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
+    const hr = await q(`SELECT * FROM hourly_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
+
+    // сума по співробітнику по днях
+    const dayAmt = {}; // "empId_day" -> сума
+    wh.forEach(r => { const day = parseInt(String(r.work_date).slice(8,10)); dayAmt[`${r.employee_id}_${day}`] = (dayAmt[`${r.employee_id}_${day}`]||0) + warehouseDayAmount(r).total; });
+    hr.forEach(r => {
+      const emp = emps.find(e => e.id === r.employee_id);
+      const rate = emp ? (parseFloat(emp.base_rate)||150) : 150;
+      const day = parseInt(String(r.work_date).slice(8,10));
+      dayAmt[`${r.employee_id}_${day}`] = (dayAmt[`${r.employee_id}_${day}`]||0) + (parseFloat(r.hours)||0)*rate;
+    });
+
+    const fmt = dd => `${String(dd).padStart(2,'0')}.${String(m).padStart(2,'0')}`;
+    const payDate = endDay => {
+      // наступний понеділок після endDay
+      let dt = new Date(y, m - 1, endDay);
+      dt.setDate(dt.getDate() + 1);
+      while (dt.getDay() !== 1) dt.setDate(dt.getDate() + 1);
+      return `${String(dt.getDate()).padStart(2,'0')}.${String(dt.getMonth()+1).padStart(2,'0')}`;
+    };
+
+    const weekRows = weeks.map(w => {
+      const perEmp = emps.map(e => {
+        let sum = 0;
+        for (let dd = w.startDay; dd <= w.endDay; dd++) sum += dayAmt[`${e.id}_${dd}`] || 0;
+        return { employee_id: e.id, name: e.name, sum };
+      });
+      const weekTotal = perEmp.reduce((a, p) => a + p.sum, 0);
+      return {
+        period: `${fmt(w.startDay)}–${fmt(w.endDay)}`,
+        pay_date: payDate(w.endDay),
+        per_emp: perEmp,
+        week_total: weekTotal,
+      };
+    });
+
+    const empTotals = emps.map(e => ({
+      employee_id: e.id, name: e.name,
+      total: weekRows.reduce((a, wr) => a + (wr.per_emp.find(p => p.employee_id === e.id)?.sum || 0), 0),
+    }));
+
+    res.json({ year: y, month: m, emps: emps.map(e => ({ id: e.id, name: e.name })), weeks: weekRows, emp_totals: empTotals });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /api/finance/average?dept=admin&from=2026-06&to=2026-09[&exclude_new=1]
 // Середня ЗП по відділу за діапазон місяців
 app.get('/api/finance/average', async (req, res) => {
