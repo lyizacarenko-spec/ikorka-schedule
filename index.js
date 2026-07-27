@@ -662,7 +662,7 @@ app.put('/api/hourly/daily', async (req, res) => {
 // Відпрацьована зміна = робочий статус (10-18, 8:30-16:30, удаленка, запізн, відробіт…).
 // вих / больн / відпуск / навч — НЕ зміни.
 // ═══════════════════════════════════════════════════════════
-const WORK_STATUSES = ['10-18','11-18','10-17','9:30-17:30','9-17','9-18','8:30-16:30','удаленка','запізн','відробіт'];
+const WORK_STATUSES = ['10-18','11-18','10-17','9:30-17:30','9-17','9-18','9-19','9-19:30','8:30-16:30','удаленка','запізн','відробіт'];
 
 // Дефолтний статус за кодом відділу і днем тижня (дзеркало фронтенду)
 function defaultStatusFor(deptCode, dow, empName) {
@@ -670,7 +670,7 @@ function defaultStatusFor(deptCode, dow, empName) {
   if (deptCode === 'admin' && empName === 'Мединська Ірина')
     return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
-  if (deptCode === 'warehouse') return '9-18';
+  if (deptCode === 'warehouse') return '9-19';
   if (deptCode === 'logistics') return dow === 0 ? 'вих' : '8:30-16:30';
   if (['management','training','admin'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
   return '10-18';
@@ -727,7 +727,8 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments) {
   const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
 
   const total = base + dayAdjust + adjTotal;
-  const advance = base / 2;
+  const payout2 = base / 2;              // 10-15: фікс половина окладу
+  const payout1 = total - payout2;       // 1-5: решта (з усіма допками)
 
   return {
     scheme_type: 'fixed_rate',
@@ -741,8 +742,10 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments) {
     adj_total: adjTotal,
     adjustments: adjList,
     total,
-    advance,
-    remainder: total - advance,
+    payout1,
+    payout2,
+    advance: payout2,        // сумісність зі старими полями
+    remainder: payout1,
   };
 }
 
