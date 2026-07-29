@@ -62,30 +62,13 @@ app.get('/api/departments/all', async (_, res) => {
 app.get('/api/employees', async (req, res) => {
   try {
     const { dept } = req.query;
-    let sql = `SELECT e.*, d.name AS dept_name, d.code AS dept_code,
-                      (SELECT MIN(se.entry_date) FROM schedule_entries se
-                       WHERE se.employee_id = e.id AND se.status IS NOT NULL
-                         AND se.status <> '-' AND se.status <> '') AS first_present,
-                      (SELECT MAX(se.entry_date) FROM schedule_entries se
-                       WHERE se.employee_id = e.id AND se.status IS NOT NULL
-                         AND se.status <> '-' AND se.status <> '') AS last_present,
-                      (SELECT MAX(se.entry_date) FROM schedule_entries se
-                       WHERE se.employee_id = e.id AND se.status = '-') AS last_fired_mark
+    let sql = `SELECT e.*, d.name AS dept_name, d.code AS dept_code
                FROM employees e JOIN departments d ON d.id = e.department_id
                WHERE e.is_active = true`;
     const params = [];
     if (dept) { sql += ` AND d.code = $1`; params.push(dept); }
     sql += ' ORDER BY d.id, CASE e.level WHEN \'top\' THEN 1 WHEN \'mid\' THEN 2 ELSE 3 END, e.name';
-    const rows = await q(sql, params);
-    rows.forEach(r => {
-      if (r.first_present) r.first_present = String(r.first_present).slice(0,10);
-      if (r.last_present)  r.last_present  = String(r.last_present).slice(0,10);
-      // звільнений, якщо є '-' ПІСЛЯ останнього реального дня
-      r.is_fired = !!(r.last_fired_mark && (!r.last_present || String(r.last_fired_mark).slice(0,10) > r.last_present));
-      if (r.last_fired_mark) r.fired_month = String(r.last_fired_mark).slice(0,7);
-      delete r.last_fired_mark;
-    });
-    res.json(rows);
+    res.json(await q(sql, params));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -834,14 +817,8 @@ app.get('/api/finance', async (req, res) => {
                   FROM employees e
                   JOIN departments d ON d.id = e.department_id
                   LEFT JOIN salary_schemes s ON s.employee_id = e.id
-                  WHERE e.is_active = true
-                    AND EXISTS (
-                      SELECT 1 FROM schedule_entries se
-                      WHERE se.employee_id = e.id
-                        AND se.status IS NOT NULL AND se.status <> '-' AND se.status <> ''
-                        AND se.entry_date BETWEEN $1 AND $2
-                    )`;
-    const params = [start, end];
+                  WHERE e.is_active = true`;
+    const params = [];
     if (dept) { empSql += ` AND d.code = $${params.length + 1}`; params.push(dept); }
     empSql += ` ORDER BY d.id, e.name`;
     const emps = await q(empSql, params);
