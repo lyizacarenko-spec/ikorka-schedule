@@ -21,6 +21,12 @@ const SALES_DEPTS = ['rzpk','retail','wholesale','resellers','hot'];
 // Реактивація/Відмови — ЗП по кількості замовлень
 const ORDER_DEPTS = ['refuse','reactivation'];
 
+// ── Константи виплат ─────────────────────────────────────────
+const NEW_MANAGER_BASE = 15000;   // умовна ставка новачка-продажника для розрахунку авансу
+const ADVANCE_CAP       = 7000;   // стеля авансу продажів (виплата 1)
+const ORDER_ADVANCE     = 5000;   // фікс аванс відмов (виплата 1)
+const TRAIN_DAY_PAY     = 100;    // оплата за день навчання (статус 'навч')
+
 async function getSheetsClient(){
   const auth = new google.auth.GoogleAuth({
     credentials: SERVICE_ACCOUNT,
@@ -694,6 +700,31 @@ function buildMonthEntries(y, m, savedEntries, deptCode, empName, startDate) {
   return out;
 }
 
+// Порахувати відпрацьовані робочі зміни + дні навчання з набору статусів
+function countWorkAndTrain(entries) {
+  let worked = 0, train = 0;
+  (entries || []).forEach(e => {
+    if (WORK_STATUSES.includes(e.status)) worked += 1;
+    else if (e.status === 'навч') train += 1;
+  });
+  return { worked, train };
+}
+
+// Чи це ПЕРШИЙ місяць співробітника (не було реальних робочих днів у попередніх місяцях).
+// Реальний день = будь-який збережений статус, КРІМ '-' (звільнення) і порожнього.
+// Використовується для авансу продажів: новачок → стеля 682×дні, старий → фікс 7000.
+async function isFirstWorkingMonth(employeeId, y, m) {
+  const firstOfMonth = `${y}-${String(m).padStart(2,'0')}-01`;
+  const rows = await q(
+    `SELECT 1 FROM schedule_entries
+     WHERE employee_id=$1 AND entry_date < $2
+       AND status IS NOT NULL AND status <> '' AND status <> '-'
+     LIMIT 1`,
+    [employeeId, firstOfMonth]
+  );
+  return rows.length === 0;
+}
+
 // кількість будніх днів (пн-пт) у місяці
 function monthWeekdays(year, month) {
   const n = new Date(year, month, 0).getDate();
@@ -708,8 +739,19 @@ function monthWeekdays(year, month) {
 // ═══════════════════════════════════════════════════════════
 // РОЗРАХУНОК ЗП: продажі (percent_plan) та відмови (orders_count)
 // Дзеркало фронтового calcSalary. salRow — рядок salary_calc.
+//
+// Розбивка на 2 виплати:
+//  Виплата 1 (аванс, може даватись у кінці місяця або 1-5 наступного):
+//    • продажі: новачок (перший місяць) → min(15000/22 × відпрац_дні, 7000)
+//               старий → 7000 фікс
+//    • відмови: 5000 фікс
+//  Виплата 2 = total − виплата1 (решта: ставка+бонус+переробка+навчання −штраф)
+//
+// opts = { workedFromGraph, trainDays, isFirstMonth } — з графіка місяця.
+// Якщо opts не передані (старий виклик) — аванс рахується без графіка:
+//   продажі → 7000, відмови → 5000, навчання = 0.
 // ═══════════════════════════════════════════════════════════
-function computeSalesSalary(salRow, isOrder) {
+function computeSalesSalary(salRow, isOrder, opts) {
   if (!salRow) return null;
   const fact = parseFloat(salRow.fact_amount) || 0;
   const plan = parseFloat(salRow.plan_amount) || 0;
@@ -718,6 +760,12 @@ function computeSalesSalary(salRow, isOrder) {
   const seniorBonus = parseFloat(salRow.senior_bonus) || 0;
   const penalty = parseFloat(salRow.penalty) || 0;
   if (!fact) return null;
+
+  const o = opts || {};
+  const trainDays   = parseInt(o.trainDays) || 0;
+  const trainPay    = trainDays * TRAIN_DAY_PAY;
+  const workedGraph = o.workedFromGraph != null ? parseInt(o.workedFromGraph) : days;
+  const isFirst     = !!o.isFirstMonth;
 
   const retExcess = Math.max(0, ret - 6);
   const retCorrection = fact * retExcess / 100;
@@ -735,10 +783,18 @@ function computeSalesSalary(salRow, isOrder) {
     rate = fullRate ? rate : Math.round(rate * days / 22);
     const bonus = cleanBase * bonusPct / 100;
     overtimePay = Math.max(0, days - 22) * 450;
-    total = rate + bonus + overtimePay + seniorBonus - penalty;
+    total = rate + bonus + overtimePay + trainPay + seniorBonus - penalty;
+
+    // Виплата 1 (аванс) для відмов = 5000 фікс
+    const payout1 = ORDER_ADVANCE;
+    const payout2 = total - payout1;
+
     return { scheme_type:'orders_count', rate, bonus_pct:bonusPct, bonus, orders, clean_base:cleanBase,
-             returns_pct:ret, worked_days:days, overtime:overtimePay, senior_bonus:seniorBonus, penalty,
-             fact, plan, total };
+             returns_pct:ret, worked_days:days, overtime:overtimePay,
+             train_days:trainDays, train_pay:trainPay,
+             senior_bonus:seniorBonus, penalty, fact, plan,
+             total, payout1, payout2,
+             advance:payout1, remainder:payout2 };
   } else {
     pct = plan > 0 ? Math.round(cleanBase / plan * 100) : 0;
     if (days < 15 && pct < 80) { rate = 8000; bonusPct = 4; }
@@ -749,10 +805,28 @@ function computeSalesSalary(salRow, isOrder) {
     else { rate = 15000; bonusPct = 7; }
     const bonus = cleanBase * bonusPct / 100;
     overtimePay = Math.max(0, days - 22) * 400;
-    total = rate + bonus + overtimePay + seniorBonus - penalty;
+    total = rate + bonus + overtimePay + trainPay + seniorBonus - penalty;
+
+    // Виплата 1 (аванс) для продажів:
+    //   новачок (перший місяць) → min(15000/22 × відпрац_дні_з_графіка, 7000)
+    //   старий → 7000 фікс
+    let payout1;
+    if (isFirst) {
+      payout1 = Math.min(Math.round(NEW_MANAGER_BASE / 22 * workedGraph), ADVANCE_CAP);
+    } else {
+      payout1 = ADVANCE_CAP;
+    }
+    // аванс не може перевищувати підсумок (захист від від'ємної виплати 2)
+    if (payout1 > total) payout1 = Math.max(0, total);
+    const payout2 = total - payout1;
+
     return { scheme_type:'percent_plan', rate, bonus_pct:bonusPct, bonus, pct, clean_base:cleanBase,
-             returns_pct:ret, worked_days:days, overtime:overtimePay, senior_bonus:seniorBonus, penalty,
-             fact, plan, total };
+             returns_pct:ret, worked_days:days, overtime:overtimePay,
+             train_days:trainDays, train_pay:trainPay,
+             worked_graph:workedGraph, is_first_month:isFirst,
+             senior_bonus:seniorBonus, penalty, fact, plan,
+             total, payout1, payout2,
+             advance:payout1, remainder:payout2 };
   }
 }
 
@@ -837,6 +911,17 @@ app.get('/api/finance', async (req, res) => {
         .push({ entry_date: r.entry_date.toISOString ? r.entry_date.toISOString().slice(0,10) : String(r.entry_date).slice(0,10), status: r.status });
     });
 
+    // хто мав реальні робочі дні ДО цього місяця (для визначення "перший місяць")
+    const priorRows = await q(
+      `SELECT DISTINCT se.employee_id
+       FROM schedule_entries se
+       JOIN employees e ON e.id = se.employee_id
+       WHERE se.entry_date < $1 AND e.is_active = true
+         AND se.status IS NOT NULL AND se.status <> '' AND se.status <> '-'`,
+      [start]
+    );
+    const hadPrior = new Set(priorRows.map(r => r.employee_id));
+
     // збережені ручні дані (премія/штраф)
     const sal = await q(
       `SELECT * FROM salary_calc WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
@@ -911,7 +996,12 @@ app.get('/api/finance', async (req, res) => {
           };
         }
         const isOrder = ORDER_DEPTS.includes(emp.dept_code);
-        const sc = computeSalesSalary(salByEmp[emp.id], isOrder);
+        // дані з графіка місяця: відпрацьовані зміни + дні навчання + чи перший місяць
+        const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
+        const { worked: workedGraph, train: trainDays } = countWorkAndTrain(monthEntries);
+        const isFirst = !hadPrior.has(emp.id);
+        const sc = computeSalesSalary(salByEmp[emp.id], isOrder,
+          { workedFromGraph: workedGraph, trainDays, isFirstMonth: isFirst });
         if (!sc) {
           return {
             employee_id: emp.id, name: emp.name,
@@ -926,7 +1016,6 @@ app.get('/api/finance', async (req, res) => {
           role: emp.role, level: emp.level,
           scheme_type: isOrder ? 'orders_count' : 'percent_plan',
           ...sc,
-          advance: 0, remainder: sc.total,
         };
       }
       const scheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
