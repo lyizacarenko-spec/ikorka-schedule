@@ -579,6 +579,12 @@ function warehouseDayAmount(r) {
   return { pack: p, fasovka: f, exit, total: p + f + exit };
 }
 
+// Тільки фасовка (скло×1 + пластик×1.5), БЕЗ упаковки і виходу.
+// Для гібридної схеми начальника складу (warehouse_hybrid).
+function fasovkaDayAmount(r) {
+  return (r.glass||0)*1 + (r.plastic||0)*1.5;
+}
+
 app.get('/api/warehouse/daily', async (req, res) => {
   try {
     const { year, month, employee_id } = req.query;
@@ -953,6 +959,45 @@ app.get('/api/finance', async (req, res) => {
     hrRows.forEach(r => { (hrByEmp[r.employee_id] = hrByEmp[r.employee_id] || []).push(r); });
 
     const rows = emps.map(emp => {
+      // гібрид начальника складу: фікс (як логісти, 40000/22) + фасовка (скло/пластик) + корегування
+      if (emp.scheme_type === 'warehouse_hybrid') {
+        // фікс-частина: computeFixedRate з базою base_rate, norm_type='fixed' (норма 22)
+        const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
+        const fixScheme = { base_rate: emp.base_rate, norm_days: emp.norm_days || 22, norm_type: emp.norm_type || 'fixed' };
+        const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, []); // корегування додаємо нижче окремо
+        // фасовка за місяць (тільки скло/пластик)
+        const list = whByEmp[emp.id] || [];
+        let fasTotal = 0, fasDays = 0;
+        list.forEach(r => { const a = fasovkaDayAmount(r); if (a > 0) { fasTotal += a; fasDays += 1; } });
+        // корегування
+        const adjList = adjByEmp[emp.id] || [];
+        const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        // total = фікс(±дні) + фасовка + корегування
+        const base = parseFloat(emp.base_rate) || 0;
+        const total = fixCalc.total + fasTotal + adjTotal;
+        // виплати: 2 (10-15) = base/2 фікс; 1 (1-5) = решта (фікс-допки + фасовка + корегування)
+        const payout2 = base / 2;
+        const payout1 = total - payout2;
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: 'warehouse_hybrid',
+          norm_type: fixScheme.norm_type,
+          base_rate: base,
+          day_price: fixCalc.day_price,
+          target_days: fixCalc.target_days,
+          worked_days: fixCalc.worked_days,
+          diff_days: fixCalc.diff_days,
+          day_adjust: fixCalc.day_adjust,
+          fix_total: fixCalc.total,
+          piece_total: fasTotal,     // фасовка за місяць
+          fas_days: fasDays,
+          adj_total: adjTotal, adjustments: adjList,
+          total, payout1, payout2,
+          advance: payout2, remainder: payout1,
+        };
+      }
       // склад-відрядник: сума за днями
       if (emp.scheme_type === 'piece_warehouse') {
         const list = whByEmp[emp.id] || [];
@@ -1096,13 +1141,15 @@ app.get('/api/finance/warehouse-weeks', async (req, res) => {
       d = endDay + 1;
     }
 
-    // склад-співробітники (piece_warehouse + hourly)
+    // склад-співробітники (piece_warehouse + hourly + warehouse_hybrid)
     const emps = await q(
       `SELECT e.id, e.name, s.scheme_type, s.base_rate
        FROM employees e
        JOIN salary_schemes s ON s.employee_id = e.id
-       WHERE e.is_active = true AND s.scheme_type IN ('piece_warehouse','hourly')
+       WHERE e.is_active = true AND s.scheme_type IN ('piece_warehouse','hourly','warehouse_hybrid')
        ORDER BY e.name`);
+    // мапа схем для правильного підрахунку (гібрид рахує ТІЛЬКИ фасовку у тижнях)
+    const schemeById = {}; emps.forEach(e => { schemeById[e.id] = e.scheme_type; });
 
     const start = `${y}-${String(m).padStart(2,'0')}-01`;
     const end   = `${y}-${String(m).padStart(2,'0')}-${String(daysInMonth).padStart(2,'0')}`;
@@ -1111,7 +1158,14 @@ app.get('/api/finance/warehouse-weeks', async (req, res) => {
 
     // сума по співробітнику по днях
     const dayAmt = {}; // "empId_day" -> сума
-    wh.forEach(r => { const day = parseInt(String(r.work_date).slice(8,10)); dayAmt[`${r.employee_id}_${day}`] = (dayAmt[`${r.employee_id}_${day}`]||0) + warehouseDayAmount(r).total; });
+    wh.forEach(r => {
+      const day = parseInt(String(r.work_date).slice(8,10));
+      // для гібрида (начальник складу) — лише фасовка; для відрядників — повна сума дня
+      const amt = schemeById[r.employee_id] === 'warehouse_hybrid'
+        ? fasovkaDayAmount(r)
+        : warehouseDayAmount(r).total;
+      dayAmt[`${r.employee_id}_${day}`] = (dayAmt[`${r.employee_id}_${day}`]||0) + amt;
+    });
     hr.forEach(r => {
       const emp = emps.find(e => e.id === r.employee_id);
       const rate = emp ? (parseFloat(emp.base_rate)||150) : 150;
@@ -1231,3 +1285,5 @@ app.get('/api/finance/average', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Schedule API on port ${PORT}`));
+
+
