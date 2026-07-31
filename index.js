@@ -1124,7 +1124,7 @@ app.get('/api/finance', async (req, res) => {
       }
       const calc = computeFixedRate(scheme,
         buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date),
-        salByEmp[emp.id], y, m, adjByEmp[emp.id]);
+       salByEmp[emp.id], y, m, adjByEmp[emp.id], emp.start_date);
       return {
         employee_id: emp.id, name: emp.name,
         dept_code: emp.dept_code, dept_name: emp.dept_name,
