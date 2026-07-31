@@ -730,7 +730,10 @@ async function isFirstWorkingMonth(employeeId, y, m) {
   );
   return rows.length === 0;
 }
-// Новачок за датою прийому: start_date у поточному місяці
+
+// Новачок за ДАТОЮ ПРИЙОМУ: start_date потрапляє в поточний місяць (y,m).
+// Прийнятий у цьому місяці -> новачок (аванс по днях+навчання).
+// Прийнятий раніше або дата не задана -> старий (фікс аванс 7000/5000).
 function isFirstMonthByStartDate(startDate, y, m) {
   if (!startDate) return false;
   const s = String(startDate).slice(0, 10);
@@ -738,6 +741,7 @@ function isFirstMonthByStartDate(startDate, y, m) {
   const sm = parseInt(s.slice(5, 7));
   return sy === y && sm === m;
 }
+
 // кількість будніх днів (пн-пт) у місяці
 function monthWeekdays(year, month) {
   const n = new Date(year, month, 0).getDate();
@@ -837,6 +841,7 @@ function computeSalesSalary(salRow, isOrder, opts) {
              worked_graph:workedGraph, is_first_month:isFirst,
              senior_bonus:seniorBonus, penalty, fact, plan,
              total, payout1, payout2,
+             pay_schedule:'sales',
              advance:payout1, remainder:payout2 };
   } else {
     pct = plan > 0 ? Math.round(cleanBase / plan * 100) : 0;
@@ -863,6 +868,7 @@ function computeSalesSalary(salRow, isOrder, opts) {
              worked_graph:workedGraph, is_first_month:isFirst,
              senior_bonus:seniorBonus, penalty, fact, plan,
              total, payout1, payout2,
+             pay_schedule:'sales',
              advance:payout1, remainder:payout2 };
   }
 }
@@ -889,8 +895,11 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments) {
   const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
 
   const total = base + dayAdjust + adjTotal;
-  const payout2 = base / 2;              // 10-15: фікс половина окладу
-  const payout1 = total - payout2;       // 1-5: решта (з усіма допками)
+  // Ставочники (адмінка, логістика, бухгалтерія, навчання, керівництво):
+  //   Виплата 1 = АВАНС (15-те число поточного місяця) = половина окладу
+  //   Виплата 2 = залишок ставки + допки (1-ше число наступного місяця)
+  const payout1 = base / 2;              // аванс 15-го
+  const payout2 = total - payout1;       // залишок 1-го наст. місяця
 
   return {
     scheme_type: 'fixed_rate',
@@ -906,8 +915,9 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments) {
     total,
     payout1,
     payout2,
-    advance: payout2,        // сумісність зі старими полями
-    remainder: payout1,
+    pay_schedule: 'staff',   // аванс 15-го, залишок 1-го наст. місяця
+    advance: payout1,
+    remainder: payout2,
   };
 }
 
@@ -1001,8 +1011,8 @@ app.get('/api/finance', async (req, res) => {
         const base = parseFloat(emp.base_rate) || 0;
         const total = fixCalc.total + fasTotal + adjTotal;
         // виплати: 2 (10-15) = base/2 фікс; 1 (1-5) = решта (фікс-допки + фасовка + корегування)
-        const payout2 = base / 2;
-        const payout1 = total - payout2;
+        const payout1 = base / 2;        // аванс 15-го
+        const payout2 = total - payout1;  // залишок 1-го наст. місяця
         return {
           employee_id: emp.id, name: emp.name,
           dept_code: emp.dept_code, dept_name: emp.dept_name,
@@ -1020,7 +1030,8 @@ app.get('/api/finance', async (req, res) => {
           fas_days: fasDays,
           adj_total: adjTotal, adjustments: adjList,
           total, payout1, payout2,
-          advance: payout2, remainder: payout1,
+          pay_schedule: 'staff',
+          advance: payout1, remainder: payout2,
         };
       }
       // склад-відрядник: сума за днями
@@ -1075,8 +1086,7 @@ app.get('/api/finance', async (req, res) => {
         // дані з графіка місяця: відпрацьовані зміни + дні навчання + чи перший місяць
         const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
         const { worked: workedGraph, train: trainDays } = countWorkAndTrain(monthEntries);
-       // Новачок: або дата прийому в цьому місяці,
-        // або (дата не задана) + є дні навчання в місяці + не працював у попередніх місяцях
+        // Новачок: дата прийому в цьому місяці АБО (дата не задана + є навчання + не працював раніше)
         const isFirst = isFirstMonthByStartDate(emp.start_date, y, m)
           || (!emp.start_date && trainDays > 0 && !hadPrior.has(emp.id));
         // computeSalesSalary тепер завжди повертає результат:
