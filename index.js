@@ -1029,7 +1029,15 @@ app.get('/api/finance', async (req, res) => {
       `SELECT * FROM hourly_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
     const hrByEmp = {};
     hrRows.forEach(r => { (hrByEmp[r.employee_id] = hrByEmp[r.employee_id] || []).push(r); });
-
+// статуси виплат (галочка бухгалтера + ручні суми)
+    let payStat = [];
+    try {
+      payStat = await q(`SELECT * FROM payout_status WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+    } catch (e) { payStat = []; }
+    const payByEmp = {};
+    payStat.forEach(p => {
+      (payByEmp[p.employee_id] = payByEmp[p.employee_id] || {})[p.payout_no] = p;
+    });
     const rows = emps.map(emp => {
       // гібрид начальника складу: фікс (як логісти, 40000/22) + фасовка (скло/пластик) + корегування
       if (emp.scheme_type === 'warehouse_hybrid') {
