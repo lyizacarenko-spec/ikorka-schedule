@@ -1170,7 +1170,17 @@ app.get('/api/finance', async (req, res) => {
         ...calc,
       };
     });
-
+// приклеїти статуси виплат + ручні суми (override має пріоритет)
+    rows.forEach(r => {
+      const ps = payByEmp[r.employee_id] || {};
+      const p1 = ps[1], p2 = ps[2];
+      r.paid1 = !!(p1 && p1.paid);
+      r.paid2 = !!(p2 && p2.paid);
+      r.override1 = p1 && p1.amount_override != null ? parseFloat(p1.amount_override) : null;
+      r.override2 = p2 && p2.amount_override != null ? parseFloat(p2.amount_override) : null;
+      r.pay1 = r.override1 != null ? r.override1 : r.payout1;
+      r.pay2 = r.override2 != null ? r.override2 : r.payout2;
+    });
     // агрегати по відділах (лише ті, у кого порахувалось)
     const deptAgg = {};
     rows.forEach(r => {
