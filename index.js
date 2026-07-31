@@ -897,12 +897,17 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate)
   const adjList = adjustments || [];
   const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
 
-  const total = base + dayAdjust + adjTotal;
+// Новачок → відпрацьовані дні × ціна дня. Решта → оклад ± різниця днів.
+  const total = isNewStaff
+    ? (worked * dayPrice + adjTotal)
+    : (base + dayAdjust + adjTotal);
   // Ставочники (адмінка, логістика, бухгалтерія, навчання, керівництво):
   //   Виплата 1 = АВАНС (15-те число поточного місяця) = половина окладу
   //   Виплата 2 = залишок ставки + допки (1-ше число наступного місяця)
-  const payout1 = base / 2;              // аванс 15-го
-  const payout2 = total - payout1;       // залишок 1-го наст. місяця
+  //   Аванс не може перевищувати підсумок (щоб виплата 2 не була від'ємною).
+  let payout1 = base / 2;                      // аванс 15-го
+  if (payout1 > total) payout1 = Math.max(0, total);
+  const payout2 = Math.max(0, total - payout1); // залишок 1-го наст. місяця
 
   return {
     scheme_type: 'fixed_rate',
