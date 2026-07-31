@@ -874,10 +874,12 @@ function computeSalesSalary(salRow, isOrder, opts) {
   }
 }
 
-function computeFixedRate(scheme, entries, salRow, y, m, adjustments) {
+function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate) {
   const base = parseFloat(scheme.base_rate) || 0;
   const normType = scheme.norm_type || 'fixed';
   const dayPrice = base / 22;                        // ціна дня завжди /22
+  // Новачок-ставочник: прийнятий у цьому місяці → платимо ЗА ВІДПРАЦЬОВАНІ ДНІ
+  const isNewStaff = isFirstMonthByStartDate(startDate, y, m);
 
   // еталон днів
   const targetDays = normType === 'month_workdays'
