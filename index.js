@@ -762,28 +762,46 @@ function monthWeekdays(year, month) {
 //   продажі → 7000, відмови → 5000, навчання = 0, новачок = false.
 // ═══════════════════════════════════════════════════════════
 function computeSalesSalary(salRow, isOrder, opts) {
-  if (!salRow) return null;
-  const fact = parseFloat(salRow.fact_amount) || 0;
-  const plan = parseFloat(salRow.plan_amount) || 0;
-  const ret  = parseFloat(salRow.returns_pct) || 0;
-  const days = parseInt(salRow.worked_days) || 0;
-  const seniorBonus = parseFloat(salRow.senior_bonus) || 0;
-  const penalty = parseFloat(salRow.penalty) || 0;
-  if (!fact) return null;
-
   const o = opts || {};
   const trainDays   = parseInt(o.trainDays) || 0;
   const trainPay    = trainDays * TRAIN_DAY_PAY;
-  const workedGraph = o.workedFromGraph != null ? parseInt(o.workedFromGraph) : days;
+  const workedGraph = o.workedFromGraph != null ? parseInt(o.workedFromGraph) : 0;
   const isFirst     = !!o.isFirstMonth;
-
-  const retExcess = Math.max(0, ret - 6);
-  const retCorrection = fact * retExcess / 100;
-  const cleanBase = fact - retCorrection;
 
   // Аванс новачка (однаковий для продажів і відмов):
   //   дні_навчання×100 + відпрацьовані_дні × (8000/22)
   const newAdvance = () => Math.round(trainDays * TRAIN_DAY_PAY + workedGraph * NEW_DAY_BASE / 22);
+
+  const fact = salRow ? (parseFloat(salRow.fact_amount) || 0) : 0;
+  const plan = salRow ? (parseFloat(salRow.plan_amount) || 0) : 0;
+  const ret  = salRow ? (parseFloat(salRow.returns_pct) || 0) : 0;
+  const days = salRow ? (parseInt(salRow.worked_days) || 0) : 0;
+  const seniorBonus = salRow ? (parseFloat(salRow.senior_bonus) || 0) : 0;
+  const penalty = salRow ? (parseFloat(salRow.penalty) || 0) : 0;
+
+  // ── СТАДІЯ АВАНСУ (оборот ще не введено) ──
+  // 31 числа факт/план невідомі (повернення докапують). Показуємо ЛИШЕ виплату 1 (аванс).
+  // Виплата 2 і total поки невизначені (null) — з'являться коли введуть оборот.
+  if (!fact) {
+    const advance = isFirst ? newAdvance() : (isOrder ? ORDER_ADVANCE : SALES_ADVANCE);
+    return {
+      scheme_type: isOrder ? 'orders_count' : 'percent_plan',
+      advance_stage: true,
+      rate: 0, bonus_pct: 0, bonus: 0, pct: 0, orders: plan,
+      clean_base: 0, returns_pct: ret, worked_days: days, overtime: 0,
+      train_days: trainDays, train_pay: trainPay,
+      worked_graph: workedGraph, is_first_month: isFirst,
+      senior_bonus: seniorBonus, penalty, fact: 0, plan,
+      total: null,                 // повна ЗП ще невідома
+      payout1: advance,            // виплата 1 = аванс (є вже 31 числа)
+      payout2: null,               // виплата 2 з'явиться з оборотом
+      advance, remainder: null,
+    };
+  }
+
+  const retExcess = Math.max(0, ret - 6);
+  const retCorrection = fact * retExcess / 100;
+  const cleanBase = fact - retCorrection;
 
   let rate = 0, bonusPct = 0, total = 0, pct = 0, overtimePay = 0;
 
@@ -1051,16 +1069,11 @@ app.get('/api/finance', async (req, res) => {
         const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
         const { worked: workedGraph, train: trainDays } = countWorkAndTrain(monthEntries);
         const isFirst = !hadPrior.has(emp.id);
+        // computeSalesSalary тепер завжди повертає результат:
+        //  • оборот=0 → лише аванс (виплата 1), total/payout2 = null (стадія авансу 31 числа)
+        //  • оборот введено → повний розрахунок з розбивкою на 2 виплати
         const sc = computeSalesSalary(salByEmp[emp.id], isOrder,
           { workedFromGraph: workedGraph, trainDays, isFirstMonth: isFirst });
-        if (!sc) {
-          return {
-            employee_id: emp.id, name: emp.name,
-            dept_code: emp.dept_code, dept_name: emp.dept_name,
-            role: emp.role, level: emp.level, scheme_type: 'sales',
-            total: null, advance: null, remainder: null, note: 'немає даних ЗП',
-          };
-        }
         return {
           employee_id: emp.id, name: emp.name,
           dept_code: emp.dept_code, dept_name: emp.dept_name,
@@ -1285,5 +1298,3 @@ app.get('/api/finance/average', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Schedule API on port ${PORT}`));
-
-
