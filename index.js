@@ -730,7 +730,14 @@ async function isFirstWorkingMonth(employeeId, y, m) {
   );
   return rows.length === 0;
 }
-
+// Новачок за датою прийому: start_date у поточному місяці
+function isFirstMonthByStartDate(startDate, y, m) {
+  if (!startDate) return false;
+  const s = String(startDate).slice(0, 10);
+  const sy = parseInt(s.slice(0, 4));
+  const sm = parseInt(s.slice(5, 7));
+  return sy === y && sm === m;
+}
 // кількість будніх днів (пн-пт) у місяці
 function monthWeekdays(year, month) {
   const n = new Date(year, month, 0).getDate();
