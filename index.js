@@ -928,7 +928,36 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate)
     remainder: payout2,
   };
 }
+// ═══════════════════════════════════════════════════════════
+// СТАТУС ВИПЛАТ (для бухгалтера): галочка «виплачено» + ручна сума
+// ═══════════════════════════════════════════════════════════
+app.get('/api/payout-status', async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    res.json(await q(
+      `SELECT * FROM payout_status WHERE calc_year=$1 AND calc_month=$2`, [y, m]));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
+app.put('/api/payout-status', async (req, res) => {
+  try {
+    const { employee_id, calc_year, calc_month, payout_no, paid, amount_override, comment } = req.body;
+    const rows = await q(
+      `INSERT INTO payout_status (employee_id, calc_year, calc_month, payout_no, paid, amount_override, paid_at, comment, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $5 THEN NOW() ELSE NULL END, $7, NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month, payout_no)
+       DO UPDATE SET paid=$5, amount_override=$6,
+                     paid_at = CASE WHEN $5 THEN COALESCE(payout_status.paid_at, NOW()) ELSE NULL END,
+                     comment=$7, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, payout_no,
+       paid === true, (amount_override === '' || amount_override == null) ? null : amount_override,
+       comment || null]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 // GET /api/finance?year=2026&month=9[&dept=admin]
 // Повертає порахований підсумок ЗП по кожному ставочнику + агрегати по відділах
 app.get('/api/finance', async (req, res) => {
