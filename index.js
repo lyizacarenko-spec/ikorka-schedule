@@ -689,7 +689,7 @@ function defaultStatusFor(deptCode, dow, empName) {
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
   if (deptCode === 'warehouse') return '9-19';
   if (deptCode === 'logistics') return dow === 0 ? 'вих' : '8:30-16:30';
-  if (['management','training','admin','marketing'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
+  if (['management','training','admin','marketing','it'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
   return '10-18';
 }
 
