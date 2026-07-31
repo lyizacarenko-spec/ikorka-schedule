@@ -806,6 +806,7 @@ function computeSalesSalary(salRow, isOrder, opts) {
       total: null,                 // повна ЗП ще невідома
       payout1: advance,            // виплата 1 = аванс (є вже 31 числа)
       payout2: null,               // виплата 2 з'явиться з оборотом
+      pay_schedule: 'sales',       // 1-ше аванс / 15-те залишок
       advance, remainder: null,
     };
   }
