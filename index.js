@@ -1088,7 +1088,7 @@ app.get('/api/finance', async (req, res) => {
         const { worked: workedGraph, train: trainDays } = countWorkAndTrain(monthEntries);
         // Новачок: дата прийому в цьому місяці АБО (дата не задана + є навчання + не працював раніше)
         const isFirst = isFirstMonthByStartDate(emp.start_date, y, m)
-          || (!emp.start_date && trainDays > 0 && !hadPrior.has(emp.id));
+          || (trainDays > 0 && !hadPrior.has(emp.id));
         // computeSalesSalary тепер завжди повертає результат:
         //  • оборот=0 → лише аванс (виплата 1), total/payout2 = null (стадія авансу 31 числа)
         //  • оборот введено → повний розрахунок з розбивкою на 2 виплати
