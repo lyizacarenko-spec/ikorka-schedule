@@ -1068,7 +1068,7 @@ app.get('/api/finance', async (req, res) => {
         // дані з графіка місяця: відпрацьовані зміни + дні навчання + чи перший місяць
         const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
         const { worked: workedGraph, train: trainDays } = countWorkAndTrain(monthEntries);
-        const isFirst = !hadPrior.has(emp.id);
+        const isFirst = isFirstMonthByStartDate(emp.start_date, y, m);
         // computeSalesSalary тепер завжди повертає результат:
         //  • оборот=0 → лише аванс (виплата 1), total/payout2 = null (стадія авансу 31 числа)
         //  • оборот введено → повний розрахунок з розбивкою на 2 виплати
