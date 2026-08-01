@@ -100,9 +100,11 @@ async function requireFinance(req, res, next) {
   next();
 }
 
-// чи має користувач доступ до відділу
+// Чи має користувач доступ до ЗП цього відділу.
+// ВАЖЛИВО: графіки доступні ВСІМ авторизованим — dept_codes обмежує лише ЗП.
 function canDept(user, code) {
   if (!user) return false;
+  if (!user.can_salary) return false;    // немає права на ЗП взагалі
   if (!user.depts) return true;          // null = всі відділи
   return user.depts.includes(code);
 }
@@ -152,6 +154,25 @@ app.post('/api/logout', async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── ЗМІНА ВЛАСНОГО ПАРОЛЯ (будь-який користувач) ──
+app.post('/api/change-password', async (req, res) => {
+  try {
+    const u = await getUser(req);
+    if (!u) return res.status(401).json({ error: 'Потрібен вхід' });
+    const { old_password, new_password } = req.body;
+    if (!new_password || String(new_password).length < 5)
+      return res.status(400).json({ error: 'Новий пароль — мінімум 5 символів' });
+    if (u.pass_hash !== sha256(old_password))
+      return res.status(403).json({ error: 'Невірний поточний пароль' });
+    await q(`UPDATE app_users SET pass_hash=$1 WHERE id=$2`, [sha256(new_password), u.id]);
+    // всі інші сесії цього користувача — вийти
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    await q(`DELETE FROM app_sessions WHERE user_id=$1 AND token<>$2`, [u.id, token]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── КЕРУВАННЯ КОРИСТУВАЧАМИ (тільки owner) ──
 app.get('/api/users', async (req, res) => {
   try {
@@ -173,6 +194,16 @@ app.post('/api/users', async (req, res) => {
       [login, sha256(password), full_name, role || 'schedule', dept_codes || null,
        !!can_finance, !!can_salary, only_employee_id || null]);
     res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/users/:id', async (req, res) => {
+  try {
+    const u = await getUser(req);
+    if (!u || u.role !== 'owner') return res.status(403).json({ error: 'Тільки для власника' });
+    if (parseInt(req.params.id) === u.id) return res.status(400).json({ error: 'Не можна видалити себе' });
+    await q(`DELETE FROM app_users WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
