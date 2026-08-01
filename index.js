@@ -1533,7 +1533,8 @@ app.get('/api/finance', requireFinance, async (req, res) => {
         };
       }
       // ГАРЯЧІ ПРОДАЖІ — окрема схема: два незалежні періоди
-      if (emp.dept_code === 'hot') {
+      // (керівні ролі сюди НЕ потрапляють — у РОПа своя мотивація нижче)
+      if (emp.dept_code === 'hot' && !['rop','head','teamlead'].includes(emp.role)) {
         const isInsta = (emp.name === 'Желюбовська Анастасія' || emp.name === 'Галаєва Анна');
         const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
         const ps = perByEmp[emp.id] || {};
