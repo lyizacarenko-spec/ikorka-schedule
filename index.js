@@ -27,6 +27,21 @@ const SALES_ADVANCE     = 7000;   // фікс аванс продажів для
 const ORDER_ADVANCE     = 5000;   // фікс аванс відмов для «старих» (виплата 1)
 const TRAIN_DAY_PAY     = 100;    // оплата за день навчання (статус 'навч')
 
+// ── Гарячі продажі (hot): своя схема ──────────────────────────
+const HOT_RATE_CALLS    = 350;   // ставка за зміну (дзвінки, база 10-17 = 7 год)
+const HOT_RATE_INSTA    = 450;   // ставка за зміну (Інста/директ, 10-21)
+const HOT_HOUR_EXTRA    = 50;    // +50 за кожну годину понад 7
+const HOT_BASE_HOURS    = 7;     // базова зміна дзвінків
+const HOT_PCT_OFFICE    = 0.02;  // ОФІС 1,3,4,5 — звичайні гарячі
+const HOT_PCT_PASTA     = 0.02;  // Паста
+const HOT_PCT_OFFICE2   = 0.05;  // ОФІС 2 — відмови + недзвін 2
+const HOT_PCT_ACTION_HI = 0.025; // Акція 230, СРЧ >= 1000
+const HOT_PCT_ACTION_LO = 0.02;  // Акція 230, СРЧ < 1000
+const HOT_SRCH_LIMIT    = 1000;  // поріг СРЧ для підвищеного %
+// години робочих статусів (для підрахунку понаднормових)
+const STATUS_HOURS = {'10-18':8,'11-18':7,'10-17':7,'9:30-17:30':8,'9-17':8,'9-18':9,
+  '9-19':10,'9-19:30':10.5,'8:30-16:30':8,'удаленка':8,'запізн':7,'відробіт':8};
+
 async function getSheetsClient(){
   const auth = new google.auth.GoogleAuth({
     credentials: SERVICE_ACCOUNT,
@@ -679,17 +694,12 @@ const WORK_STATUSES = ['10-18','11-18','10-17','9:30-17:30','9-17','9-18','9-19'
 // Дефолтний статус за кодом відділу і днем тижня (дзеркало фронтенду)
 function defaultStatusFor(deptCode, dow, empName) {
   if (['refuse','reactivation'].includes(deptCode)) return '9:30-17:30';
-  if (empName === 'Климюк Марія') {
-    if (dow === 0 || dow === 6) return 'вих';
-    if (dow === 4 || dow === 5) return 'удаленка';
-    return '10-18';
-  }
   if (deptCode === 'admin' && empName === 'Мединська Ірина')
     return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
   if (deptCode === 'warehouse') return '9-19';
   if (deptCode === 'logistics') return dow === 0 ? 'вих' : '8:30-16:30';
-  if (['management','training','admin','marketing','it'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
+  if (['management','training','admin'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
   return '10-18';
 }
 
@@ -879,11 +889,69 @@ function computeSalesSalary(salRow, isOrder, opts) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════
+// ГАРЯЧІ ПРОДАЖІ — розрахунок за період (1-14 або 15-кінець)
+// Ставка: Інста(директ) 450×зміни; Дзвінки 350×зміни + 50×(години понад 7)
+// Відсотки: офіс 2%, паста 2%, офіс2 (відмови/недзвін) 5%,
+//           акція 230 — 2.5% якщо СРЧ>=1000, інакше 2%
+// ═══════════════════════════════════════════════════════════
+function computeHotPeriod(entries, per, isInsta) {
+  // зміни і понаднормові години з графіка
+  let shifts = 0, extraHours = 0;
+  (entries || []).forEach(e => {
+    const hrs = STATUS_HOURS[e.status];
+    if (hrs != null && hrs > 0) {
+      shifts += 1;
+      if (!isInsta && hrs > HOT_BASE_HOURS) extraHours += (hrs - HOT_BASE_HOURS);
+    }
+  });
+  const rate = isInsta
+    ? HOT_RATE_INSTA * shifts
+    : HOT_RATE_CALLS * shifts + HOT_HOUR_EXTRA * extraHours;
+
+  const p = per || {};
+  const sOffice  = parseFloat(p.sum_office)  || 0;
+  const sPasta   = parseFloat(p.sum_pasta)   || 0;
+  const sOffice2 = parseFloat(p.sum_office2) || 0;
+  const sAction  = parseFloat(p.sum_action)  || 0;
+  const srch     = parseFloat(p.srch_action) || 0;
+  const bonus    = parseFloat(p.bonus)   || 0;
+  const penalty  = parseFloat(p.penalty) || 0;
+
+  const actPct = srch >= HOT_SRCH_LIMIT ? HOT_PCT_ACTION_HI : HOT_PCT_ACTION_LO;
+  const payOffice  = sOffice  * HOT_PCT_OFFICE;
+  const payPasta   = sPasta   * HOT_PCT_PASTA;
+  const payOffice2 = sOffice2 * HOT_PCT_OFFICE2;
+  const payAction  = sAction  * actPct;
+
+  const total = rate + payOffice + payPasta + payOffice2 + payAction + bonus - penalty;
+
+  return {
+    shifts, extra_hours: extraHours, rate, is_insta: isInsta,
+    sum_office: sOffice, pay_office: payOffice,
+    sum_pasta: sPasta, pay_pasta: payPasta,
+    sum_office2: sOffice2, pay_office2: payOffice2,
+    sum_action: sAction, srch_action: srch,
+    action_pct: actPct * 100, pay_action: payAction,
+    bonus, penalty, total,
+  };
+}
+
+// Дати періоду: 1 = 1-14, 2 = 15-кінець місяця
+function periodRange(y, m, no) {
+  const last = new Date(y, m, 0).getDate();
+  const mm = String(m).padStart(2, '0');
+  return no === 1
+    ? { from: `${y}-${mm}-01`, to: `${y}-${mm}-14` }
+    : { from: `${y}-${mm}-15`, to: `${y}-${mm}-${String(last).padStart(2,'0')}` };
+}
+
 function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate) {
   const base = parseFloat(scheme.base_rate) || 0;
   const normType = scheme.norm_type || 'fixed';
   const dayPrice = base / 22;                        // ціна дня завжди /22
-  // Новачок-ставочник: прийнятий у цьому місяці → платимо ЗА ВІДПРАЦЬОВАНІ ДНІ
+  // Новачок-ставочник: прийнятий у цьому місяці → платимо ЗА ВІДПРАЦЬОВАНІ ДНІ,
+  // а не «оклад мінус пропуски» (інакше виходить занижена сума).
   const isNewStaff = isFirstMonthByStartDate(startDate, y, m);
 
   // еталон днів
@@ -902,7 +970,7 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate)
   const adjList = adjustments || [];
   const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
 
-// Новачок → відпрацьовані дні × ціна дня. Решта → оклад ± різниця днів.
+  // Новачок → відпрацьовані дні × ціна дня. Решта → оклад ± різниця днів.
   const total = isNewStaff
     ? (worked * dayPrice + adjTotal)
     : (base + dayAdjust + adjTotal);
@@ -933,8 +1001,11 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate)
     remainder: payout2,
   };
 }
+
 // ═══════════════════════════════════════════════════════════
 // СТАТУС ВИПЛАТ (для бухгалтера): галочка «виплачено» + ручна сума
+// payout_no: 1 = перша виплата (аванс), 2 = друга (залишок)
+// amount_override: якщо задано — використовується замість розрахованої
 // ═══════════════════════════════════════════════════════════
 app.get('/api/payout-status', async (req, res) => {
   try {
@@ -963,6 +1034,43 @@ app.put('/api/payout-status', async (req, res) => {
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ═══════════════════════════════════════════════════════════
+// ГАРЯЧІ ПРОДАЖІ — суми по категоріях за період (вводить РОП)
+// period_no: 1 = 1-14 (виплата 15-го), 2 = 15-кінець (виплата 1-го)
+// ═══════════════════════════════════════════════════════════
+app.get('/api/salary-period', async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM salary_period WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (req.query.employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(req.query.employee_id)); }
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/salary-period', async (req, res) => {
+  try {
+    const { employee_id, calc_year, calc_month, period_no,
+            sum_office, sum_pasta, sum_office2, sum_action, srch_action,
+            bonus, penalty, note } = req.body;
+    const rows = await q(
+      `INSERT INTO salary_period (employee_id, calc_year, calc_month, period_no,
+         sum_office, sum_pasta, sum_office2, sum_action, srch_action, bonus, penalty, note, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month, period_no)
+       DO UPDATE SET sum_office=$5, sum_pasta=$6, sum_office2=$7, sum_action=$8,
+                     srch_action=$9, bonus=$10, penalty=$11, note=$12, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, period_no,
+       sum_office||0, sum_pasta||0, sum_office2||0, sum_action||0, srch_action||0,
+       bonus||0, penalty||0, note||null]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /api/finance?year=2026&month=9[&dept=admin]
 // Повертає порахований підсумок ЗП по кожному ставочнику + агрегати по відділах
 app.get('/api/finance', async (req, res) => {
@@ -1034,22 +1142,32 @@ app.get('/api/finance', async (req, res) => {
       `SELECT * FROM hourly_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
     const hrByEmp = {};
     hrRows.forEach(r => { (hrByEmp[r.employee_id] = hrByEmp[r.employee_id] || []).push(r); });
-// статуси виплат (галочка бухгалтера + ручні суми)
+
+    // гарячі продажі — суми по періодах
+    let perRows = [];
+    try {
+      perRows = await q(`SELECT * FROM salary_period WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+    } catch (e) { perRows = []; }
+    const perByEmp = {};
+    perRows.forEach(p => { (perByEmp[p.employee_id] = perByEmp[p.employee_id] || {})[p.period_no] = p; });
+
+    // статуси виплат (галочка бухгалтера + ручні суми)
     let payStat = [];
     try {
       payStat = await q(`SELECT * FROM payout_status WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
-    } catch (e) { payStat = []; }
+    } catch (e) { payStat = []; }   // таблиці ще нема — не падаємо
     const payByEmp = {};
     payStat.forEach(p => {
       (payByEmp[p.employee_id] = payByEmp[p.employee_id] || {})[p.payout_no] = p;
     });
+
     const rows = emps.map(emp => {
       // гібрид начальника складу: фікс (як логісти, 40000/22) + фасовка (скло/пластик) + корегування
       if (emp.scheme_type === 'warehouse_hybrid') {
         // фікс-частина: computeFixedRate з базою base_rate, norm_type='fixed' (норма 22)
         const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
         const fixScheme = { base_rate: emp.base_rate, norm_days: emp.norm_days || 22, norm_type: emp.norm_type || 'fixed' };
-        const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, []); // корегування додаємо нижче окремо
+        const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date); // корегування додаємо нижче окремо
         // фасовка за місяць (тільки скло/пластик)
         const list = whByEmp[emp.id] || [];
         let fasTotal = 0, fasDays = 0;
@@ -1122,6 +1240,35 @@ app.get('/api/finance', async (req, res) => {
           total, advance: 0, remainder: total,
         };
       }
+      // ГАРЯЧІ ПРОДАЖІ — окрема схема: два незалежні періоди
+      if (emp.dept_code === 'hot') {
+        const isInsta = (emp.name === 'Желюбовська Анастасія' || emp.name === 'Галаєва Анна');
+        const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
+        const ps = perByEmp[emp.id] || {};
+        const r1 = periodRange(y, m, 1), r2 = periodRange(y, m, 2);
+        const ent1 = monthEntries.filter(e => e.entry_date >= r1.from && e.entry_date <= r1.to);
+        const ent2 = monthEntries.filter(e => e.entry_date >= r2.from && e.entry_date <= r2.to);
+        const c1 = computeHotPeriod(ent1, ps[1], isInsta);
+        const c2 = computeHotPeriod(ent2, ps[2], isInsta);
+        const adjList = adjByEmp[emp.id] || [];
+        const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        const total = c1.total + c2.total + adjTotal;
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: 'hot',
+          is_insta: isInsta,
+          period1: c1, period2: c2,
+          worked_days: c1.shifts + c2.shifts,
+          adj_total: adjTotal, adjustments: adjList,
+          total,
+          payout1: c1.total,          // виплата 15-го (за 1-14)
+          payout2: c2.total + adjTotal, // виплата 1-го наст. (за 15-кінець)
+          pay_schedule: 'hot',
+          advance: c1.total, remainder: c2.total,
+        };
+      }
       // продажі / відмови: рахуємо із збереженого salary_calc
       if (SALES_DEPTS.includes(emp.dept_code) || ORDER_DEPTS.includes(emp.dept_code)) {
         if (['rop','head','teamlead'].includes(emp.role)) {
@@ -1138,7 +1285,7 @@ app.get('/api/finance', async (req, res) => {
         const { worked: workedGraph, train: trainDays } = countWorkAndTrain(monthEntries);
         // Новачок: дата прийому в цьому місяці АБО (дата не задана + є навчання + не працював раніше)
         const isFirst = isFirstMonthByStartDate(emp.start_date, y, m)
-          || (trainDays > 0 && !hadPrior.has(emp.id));
+          || (!emp.start_date && trainDays > 0 && !hadPrior.has(emp.id));
         // computeSalesSalary тепер завжди повертає результат:
         //  • оборот=0 → лише аванс (виплата 1), total/payout2 = null (стадія авансу 31 числа)
         //  • оборот введено → повний розрахунок з розбивкою на 2 виплати
@@ -1166,7 +1313,7 @@ app.get('/api/finance', async (req, res) => {
       }
       const calc = computeFixedRate(scheme,
         buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date),
-       salByEmp[emp.id], y, m, adjByEmp[emp.id], emp.start_date);
+        salByEmp[emp.id], y, m, adjByEmp[emp.id], emp.start_date);
       return {
         employee_id: emp.id, name: emp.name,
         dept_code: emp.dept_code, dept_name: emp.dept_name,
@@ -1175,17 +1322,22 @@ app.get('/api/finance', async (req, res) => {
         ...calc,
       };
     });
-// приклеїти статуси виплат + ручні суми (override має пріоритет)
+
+    // приклеїти статуси виплат + ручні суми (override має пріоритет)
     rows.forEach(r => {
       const ps = payByEmp[r.employee_id] || {};
       const p1 = ps[1], p2 = ps[2];
       r.paid1 = !!(p1 && p1.paid);
       r.paid2 = !!(p2 && p2.paid);
+      r.paid1_at = p1?.paid_at || null;
+      r.paid2_at = p2?.paid_at || null;
       r.override1 = p1 && p1.amount_override != null ? parseFloat(p1.amount_override) : null;
       r.override2 = p2 && p2.amount_override != null ? parseFloat(p2.amount_override) : null;
+      // фактична сума до виплати: ручна, якщо задана
       r.pay1 = r.override1 != null ? r.override1 : r.payout1;
       r.pay2 = r.override2 != null ? r.override2 : r.payout2;
     });
+
     // агрегати по відділах (лише ті, у кого порахувалось)
     const deptAgg = {};
     rows.forEach(r => {
