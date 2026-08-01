@@ -766,6 +766,15 @@ function warehouseDayAmount(r) {
   return { pack: p, fasovka: f, exit, total: p + f + exit };
 }
 
+// Дата у форматі YYYY-MM-DD (Date -> ISO, рядок -> як є).
+// ВАЖЛИВО: String(Date) дає "Tue Jul 14 2026..." — фронт такий формат не розуміє.
+function ymd(v) {
+  if (!v) return '';
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  const s = String(v);
+  return s.length >= 10 && s[4] === '-' ? s.slice(0, 10) : new Date(s).toISOString().slice(0, 10);
+}
+
 // Тільки фасовка (скло×1 + пластик×1.5), БЕЗ упаковки і виходу.
 // Для гібридної схеми начальника складу (warehouse_hybrid).
 function fasovkaDayAmount(r) {
@@ -784,7 +793,7 @@ app.get('/api/warehouse/daily', async (req, res) => {
     if (employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(employee_id)); }
     sql += ` ORDER BY work_date`;
     const rows = await q(sql, params);
-    res.json(rows.map(r => ({ ...r, work_date: String(r.work_date).slice(0,10), calc: warehouseDayAmount(r) })));
+    res.json(rows.map(r => ({ ...r, work_date: ymd(r.work_date), calc: warehouseDayAmount(r) })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -800,7 +809,7 @@ app.put('/api/warehouse/daily', async (req, res) => {
       [employee_id, work_date, pack6||0, pack7||0, pack8||0, pack9||0, glass||0, plastic||0, exit_rate==null?300:exit_rate]
     );
     const r = rows[0];
-    res.json({ ...r, work_date: String(r.work_date).slice(0,10), calc: warehouseDayAmount(r) });
+    res.json({ ...r, work_date: ymd(r.work_date), calc: warehouseDayAmount(r) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -831,7 +840,7 @@ app.get('/api/hourly/daily', async (req, res) => {
     if (employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(employee_id)); }
     sql += ` ORDER BY work_date`;
     const rows = await q(sql, params);
-    res.json(rows.map(r => ({ ...r, work_date: String(r.work_date).slice(0,10) })));
+    res.json(rows.map(r => ({ ...r, work_date: ymd(r.work_date) })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -846,7 +855,7 @@ app.put('/api/hourly/daily', async (req, res) => {
       [employee_id, work_date, hours || 0]
     );
     const r = rows[0];
-    res.json({ ...r, work_date: String(r.work_date).slice(0,10) });
+    res.json({ ...r, work_date: ymd(r.work_date) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
