@@ -1071,6 +1071,73 @@ function computeSalesSalary(salRow, isOrder, opts) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// РОП — мотивація керівників відділів
+// Ставка + KPI (СРЧ, Апрув) + план + % з особистих замовлень
+// ═══════════════════════════════════════════════════════════
+const ROP_CFG = {
+  rzpk:   { rate: 15000, kpi: 5000, plan_bonus: 10000, own_pct: 0.05, mode: 'prop'  },
+  refuse: { rate: 15000, kpi: 5000, plan_bonus: 5000,  own_pct: 0.05, mode: 'prop'  },
+  hot:    { rate: 15000, kpi: 7500, plan_bonus: 0,     own_pct: 0,    mode: 'scale' },
+};
+// Шкала перевиконання для РОПа гарячої бази (% від ставки)
+const ROP_HOT_SCALE = { 3:10, 4:15, 5:20, 6:28, 7:35, 8:42, 9:46, 10:50 };
+function ropHotOverPct(over) {
+  const o = Math.floor(over);
+  if (o < 3) return 0;
+  if (o <= 10) return ROP_HOT_SCALE[o] || 0;
+  return Math.min(50 + (o - 10) * 5, 80);   // +5% за кожен % понад 10, стеля 80%
+}
+
+function computeRopSalary(deptCode, row) {
+  const C = ROP_CFG[deptCode];
+  if (!C) return null;
+  const r = row || {};
+  const planTarget = parseFloat(r.plan_target) || 0;
+  const planFact   = parseFloat(r.plan_fact)   || 0;
+  const srchOk = !!r.srch_ok, aprOk = !!r.apr_ok;
+  const pct = planTarget > 0 ? (planFact / planTarget * 100) : 0;
+
+  // KPI виплачуються незалежно від плану
+  let payKpi = 0;
+  if (srchOk) payKpi += C.kpi;
+  if (aprOk)  payKpi += C.kpi;
+
+  // Доплата за план
+  let payPlan = 0;
+  if (C.mode === 'scale') {
+    // гаряча: бонус лише якщо ОБИДВА KPI виконані і є перевиконання
+    if (srchOk && aprOk && pct > 100) payPlan = C.rate * ropHotOverPct(pct - 100) / 100;
+  } else {
+    // РЗПК / відмови: пропорційно, від 80%
+    if (pct >= 80) payPlan = C.plan_bonus * pct / 100;
+  }
+
+  // Відсоток з особистих замовлень
+  let payOwn = 0;
+  if (deptCode === 'hot') {
+    payOwn = (parseFloat(r.own_hot) || 0) * 0.015 + (parseFloat(r.own_cold) || 0) * 0.05;
+  } else {
+    payOwn = (parseFloat(r.own_sum) || 0) * C.own_pct;
+  }
+
+  const bonus = parseFloat(r.bonus) || 0;
+  const penalty = parseFloat(r.penalty) || 0;
+  const total = C.rate + payKpi + payPlan + payOwn + bonus - penalty;
+
+  return {
+    scheme_type: 'rop', dept_code: deptCode,
+    rate: C.rate, plan_target: planTarget, plan_fact: planFact,
+    plan_pct: Math.round(pct * 10) / 10,
+    srch_ok: srchOk, apr_ok: aprOk, kpi_each: C.kpi, pay_kpi: payKpi,
+    pay_plan: payPlan, plan_bonus_max: C.plan_bonus,
+    own_sum: parseFloat(r.own_sum) || 0,
+    own_hot: parseFloat(r.own_hot) || 0,
+    own_cold: parseFloat(r.own_cold) || 0,
+    pay_own: payOwn, bonus, penalty, total,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════
 // ГАРЯЧІ ПРОДАЖІ — розрахунок за період (1-14 або 15-кінець)
 // Ставка: Інста(директ) 450×зміни; Дзвінки 350×зміни + 50×(години понад 7)
 // Відсотки: офіс 2%, паста 2%, офіс2 (відмови/недзвін) 5%,
@@ -1253,6 +1320,42 @@ app.put('/api/salary-period', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── РОП: дані мотивації (вводить РОП або комерційний директор) ──
+app.get('/api/rop-salary', async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM rop_salary WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (req.query.employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(req.query.employee_id)); }
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/rop-salary', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const { employee_id, calc_year, calc_month, plan_target, plan_fact,
+            srch_ok, apr_ok, own_sum, own_hot, own_cold, bonus, penalty, note } = req.body;
+    const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
+    if (empRow.length && !canDept(req.user, empRow[0].code))
+      return res.status(403).json({ error: 'Немає доступу до цього відділу' });
+    const rows = await q(
+      `INSERT INTO rop_salary (employee_id, calc_year, calc_month, plan_target, plan_fact,
+         srch_ok, apr_ok, own_sum, own_hot, own_cold, bonus, penalty, note, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month)
+       DO UPDATE SET plan_target=$4, plan_fact=$5, srch_ok=$6, apr_ok=$7,
+                     own_sum=$8, own_hot=$9, own_cold=$10, bonus=$11, penalty=$12,
+                     note=$13, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, plan_target||0, plan_fact||0,
+       srch_ok===true, apr_ok===true, own_sum||0, own_hot||0, own_cold||0,
+       bonus||0, penalty||0, note||null]);
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /api/finance?year=2026&month=9[&dept=admin]
 // Повертає порахований підсумок ЗП по кожному ставочнику + агрегати по відділах
 app.get('/api/finance', requireFinance, async (req, res) => {
@@ -1324,6 +1427,13 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       `SELECT * FROM hourly_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
     const hrByEmp = {};
     hrRows.forEach(r => { (hrByEmp[r.employee_id] = hrByEmp[r.employee_id] || []).push(r); });
+
+    // РОП — дані мотивації
+    let ropRows = [];
+    try { ropRows = await q(`SELECT * FROM rop_salary WHERE calc_year=$1 AND calc_month=$2`, [y, m]); }
+    catch (e) { ropRows = []; }
+    const ropByEmp = {};
+    ropRows.forEach(r => { ropByEmp[r.employee_id] = r; });
 
     // гарячі продажі — суми по періодах
     let perRows = [];
@@ -1454,6 +1564,24 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       // продажі / відмови: рахуємо із збереженого salary_calc
       if (SALES_DEPTS.includes(emp.dept_code) || ORDER_DEPTS.includes(emp.dept_code)) {
         if (['rop','head','teamlead'].includes(emp.role)) {
+          // РОП відділів продажів — своя мотивація
+          if (emp.role === 'rop' && ROP_CFG[emp.dept_code]) {
+            const rc = computeRopSalary(emp.dept_code, ropByEmp[emp.id]);
+            const adjList = adjByEmp[emp.id] || [];
+            const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+            const total = rc.total + adjTotal;
+            const payout1 = ROP_CFG[emp.dept_code].rate / 2;   // аванс 1-го = половина ставки
+            return {
+              employee_id: emp.id, name: emp.name,
+              dept_code: emp.dept_code, dept_name: emp.dept_name,
+              role: emp.role, level: emp.level,
+              ...rc,
+              adj_total: adjTotal, adjustments: adjList,
+              total, payout1, payout2: Math.max(0, total - payout1),
+              pay_schedule: 'sales',
+              advance: payout1, remainder: Math.max(0, total - payout1),
+            };
+          }
           return {
             employee_id: emp.id, name: emp.name,
             dept_code: emp.dept_code, dept_name: emp.dept_name,
