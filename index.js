@@ -61,6 +61,140 @@ async function q(sql, params = []) {
   return rows;
 }
 
+// ═══════════════════════════════════════════════════════════
+// АВТОРИЗАЦІЯ ТА ПРАВА ДОСТУПУ
+// ═══════════════════════════════════════════════════════════
+const crypto = require('crypto');
+const sha256 = s => crypto.createHash('sha256').update(String(s)).digest('hex');
+const newToken = () => crypto.randomBytes(32).toString('hex');
+
+// Отримати користувача за токеном (Authorization: Bearer <token>)
+async function getUser(req) {
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (!token) return null;
+  const rows = await q(
+    `SELECT u.* FROM app_sessions s
+     JOIN app_users u ON u.id = s.user_id
+     WHERE s.token = $1 AND s.expires_at > NOW() AND u.is_active = true`, [token]);
+  if (!rows.length) return null;
+  const u = rows[0];
+  u.depts = u.dept_codes ? u.dept_codes.split(',').map(x => x.trim()).filter(Boolean) : null;
+  return u;
+}
+
+// middleware: вимагає входу
+async function requireAuth(req, res, next) {
+  const u = await getUser(req);
+  if (!u) return res.status(401).json({ error: 'Потрібен вхід' });
+  req.user = u;
+  next();
+}
+
+// middleware: вимагає доступ до Фінансів
+async function requireFinance(req, res, next) {
+  const u = await getUser(req);
+  if (!u) return res.status(401).json({ error: 'Потрібен вхід' });
+  if (!u.can_finance) return res.status(403).json({ error: 'Немає доступу до фінансів' });
+  req.user = u;
+  next();
+}
+
+// чи має користувач доступ до відділу
+function canDept(user, code) {
+  if (!user) return false;
+  if (!user.depts) return true;          // null = всі відділи
+  return user.depts.includes(code);
+}
+
+// ── ВХІД ──
+app.post('/api/login', async (req, res) => {
+  try {
+    const { login, password } = req.body;
+    if (!login || !password) return res.status(400).json({ error: 'Вкажіть логін і пароль' });
+    const rows = await q(
+      `SELECT * FROM app_users WHERE lower(login)=lower($1) AND is_active=true`, [login]);
+    if (!rows.length || rows[0].pass_hash !== sha256(password))
+      return res.status(401).json({ error: 'Невірний логін або пароль' });
+    const u = rows[0];
+    const token = newToken();
+    await q(`INSERT INTO app_sessions (token, user_id, expires_at)
+             VALUES ($1,$2, NOW() + INTERVAL '30 days')`, [token, u.id]);
+    await q(`UPDATE app_users SET last_login=NOW() WHERE id=$1`, [u.id]);
+    res.json({
+      token,
+      user: {
+        id: u.id, full_name: u.full_name, role: u.role,
+        dept_codes: u.dept_codes ? u.dept_codes.split(',').map(x=>x.trim()) : null,
+        can_finance: u.can_finance, can_salary: u.can_salary,
+        only_employee_id: u.only_employee_id,
+      }
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ХТО Я ──
+app.get('/api/me', async (req, res) => {
+  const u = await getUser(req);
+  if (!u) return res.status(401).json({ error: 'Потрібен вхід' });
+  res.json({
+    id: u.id, full_name: u.full_name, role: u.role,
+    dept_codes: u.depts, can_finance: u.can_finance,
+    can_salary: u.can_salary, only_employee_id: u.only_employee_id,
+  });
+});
+
+// ── ВИХІД ──
+app.post('/api/logout', async (req, res) => {
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (token) await q(`DELETE FROM app_sessions WHERE token=$1`, [token]);
+  res.json({ ok: true });
+});
+
+// ── КЕРУВАННЯ КОРИСТУВАЧАМИ (тільки owner) ──
+app.get('/api/users', async (req, res) => {
+  try {
+    const u = await getUser(req);
+    if (!u || u.role !== 'owner') return res.status(403).json({ error: 'Тільки для власника' });
+    res.json(await q(`SELECT id, login, full_name, role, dept_codes, can_finance, can_salary,
+                             only_employee_id, is_active, last_login FROM app_users ORDER BY id`));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/users', async (req, res) => {
+  try {
+    const u = await getUser(req);
+    if (!u || u.role !== 'owner') return res.status(403).json({ error: 'Тільки для власника' });
+    const { login, password, full_name, role, dept_codes, can_finance, can_salary, only_employee_id } = req.body;
+    const rows = await q(
+      `INSERT INTO app_users (login, pass_hash, full_name, role, dept_codes, can_finance, can_salary, only_employee_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, login, full_name, role`,
+      [login, sha256(password), full_name, role || 'schedule', dept_codes || null,
+       !!can_finance, !!can_salary, only_employee_id || null]);
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/users/:id', async (req, res) => {
+  try {
+    const u = await getUser(req);
+    if (!u || u.role !== 'owner') return res.status(403).json({ error: 'Тільки для власника' });
+    const { password, full_name, role, dept_codes, can_finance, can_salary, only_employee_id, is_active } = req.body;
+    if (password) await q(`UPDATE app_users SET pass_hash=$1 WHERE id=$2`, [sha256(password), req.params.id]);
+    const rows = await q(
+      `UPDATE app_users SET
+         full_name=COALESCE($1,full_name), role=COALESCE($2,role),
+         dept_codes=$3, can_finance=COALESCE($4,can_finance),
+         can_salary=COALESCE($5,can_salary), only_employee_id=$6,
+         is_active=COALESCE($7,is_active)
+       WHERE id=$8 RETURNING id, login, full_name, role, dept_codes, can_finance, can_salary, is_active`,
+      [full_name, role, dept_codes || null, can_finance, can_salary,
+       only_employee_id || null, is_active, req.params.id]);
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/health', (_, res) => res.json({ ok: true }));
 
 // ── DEPARTMENTS ──────────────────────────────────────────────
@@ -394,9 +528,16 @@ app.get('/api/salary', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/salary', async (req, res) => {
+app.put('/api/salary', requireAuth, async (req, res) => {
   try {
     const { employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual } = req.body;
+    // перевірка прав: ЗП можна вводити лише своїм відділам
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
+    if (empRow.length && !canDept(req.user, empRow[0].code))
+      return res.status(403).json({ error: 'Немає доступу до цього відділу' });
+    if (req.user.only_employee_id && req.user.only_employee_id !== parseInt(employee_id))
+      return res.status(403).json({ error: 'Немає доступу до цього співробітника' });
     const rows = await q(
       `INSERT INTO salary_calc (employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
@@ -532,7 +673,7 @@ app.get('/api/salary-schemes', async (_, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/salary-schemes', async (req, res) => {
+app.put('/api/salary-schemes', requireAuth, async (req, res) => {
   try {
     const { employee_id, scheme_type, base_rate, norm_days, norm_type } = req.body;
     const rows = await q(
@@ -1007,7 +1148,7 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate)
 // payout_no: 1 = перша виплата (аванс), 2 = друга (залишок)
 // amount_override: якщо задано — використовується замість розрахованої
 // ═══════════════════════════════════════════════════════════
-app.get('/api/payout-status', async (req, res) => {
+app.get('/api/payout-status', requireFinance, async (req, res) => {
   try {
     const y = parseInt(req.query.year || new Date().getFullYear());
     const m = parseInt(req.query.month || new Date().getMonth() + 1);
@@ -1016,7 +1157,7 @@ app.get('/api/payout-status', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/payout-status', async (req, res) => {
+app.put('/api/payout-status', requireFinance, async (req, res) => {
   try {
     const { employee_id, calc_year, calc_month, payout_no, paid, amount_override, comment } = req.body;
     const rows = await q(
@@ -1050,8 +1191,9 @@ app.get('/api/salary-period', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/salary-period', async (req, res) => {
+app.put('/api/salary-period', requireAuth, async (req, res) => {
   try {
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
     const { employee_id, calc_year, calc_month, period_no,
             sum_office, sum_pasta, sum_office2, sum_action, srch_action,
             bonus, penalty, note } = req.body;
@@ -1073,7 +1215,7 @@ app.put('/api/salary-period', async (req, res) => {
 
 // GET /api/finance?year=2026&month=9[&dept=admin]
 // Повертає порахований підсумок ЗП по кожному ставочнику + агрегати по відділах
-app.get('/api/finance', async (req, res) => {
+app.get('/api/finance', requireFinance, async (req, res) => {
   try {
     const { year, month, dept } = req.query;
     const y = parseInt(year || new Date().getFullYear());
@@ -1364,7 +1506,7 @@ app.get('/api/finance', async (req, res) => {
 // GET /api/finance/warehouse-weeks?year=&month=
 // Понедільна розбивка складу (пн-нд, тижні обриваються кінцем місяця).
 // Дата виплати = наступний понеділок після кінця тижня.
-app.get('/api/finance/warehouse-weeks', async (req, res) => {
+app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
   try {
     const y = parseInt(req.query.year || new Date().getFullYear());
     const m = parseInt(req.query.month || new Date().getMonth() + 1);
@@ -1453,7 +1595,7 @@ app.get('/api/finance/warehouse-weeks', async (req, res) => {
 
 // GET /api/finance/average?dept=admin&from=2026-06&to=2026-09[&exclude_new=1]
 // Середня ЗП по відділу за діапазон місяців
-app.get('/api/finance/average', async (req, res) => {
+app.get('/api/finance/average', requireFinance, async (req, res) => {
   try {
     const { dept, from, to, exclude_new, employee_ids } = req.query;
     if (!from || !to) return res.status(400).json({ error: 'from/to required (YYYY-MM)' });
