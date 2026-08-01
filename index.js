@@ -248,7 +248,10 @@ app.get('/api/departments/all', async (_, res) => {
 app.get('/api/employees', async (req, res) => {
   try {
     const { dept } = req.query;
-    let sql = `SELECT e.*, d.name AS dept_name, d.code AS dept_code
+    // fired_date — останній день зі статусом '-' (звільнення)
+    let sql = `SELECT e.*, d.name AS dept_name, d.code AS dept_code,
+                      (SELECT MAX(se.entry_date) FROM schedule_entries se
+                       WHERE se.employee_id = e.id AND se.status = '-') AS fired_date
                FROM employees e JOIN departments d ON d.id = e.department_id
                WHERE e.is_active = true`;
     const params = [];
