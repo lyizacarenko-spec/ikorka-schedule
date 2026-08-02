@@ -256,7 +256,7 @@ app.get('/api/employees', async (req, res) => {
                WHERE e.is_active = true`;
     const params = [];
     if (dept) { sql += ` AND d.code = $1`; params.push(dept); }
-    sql += ' ORDER BY d.id, CASE e.level WHEN \'top\' THEN 1 WHEN \'mid\' THEN 2 ELSE 3 END, e.name';
+    sql += ' ORDER BY d.id, COALESCE(e.sort_order, 999999), e.name';
     res.json(await q(sql, params));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
