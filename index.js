@@ -289,7 +289,7 @@ app.post('/api/employees', async (req, res) => {
 
 app.patch('/api/employees/:id', async (req, res) => {
   try {
-    const { name, department_id, level, role, is_active, team, start_date } = req.body;
+    const { name, department_id, level, role, is_active, team, start_date, position } = req.body;
     const rows = await q(
       `UPDATE employees SET
         name = COALESCE($1, name),
