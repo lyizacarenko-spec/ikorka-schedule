@@ -298,9 +298,10 @@ app.patch('/api/employees/:id', async (req, res) => {
         role = COALESCE($4, role),
         is_active = COALESCE($5, is_active),
         team = COALESCE($7, team),
-        start_date = COALESCE($8, start_date)
+        start_date = COALESCE($8, start_date),
+        position = COALESCE($9, position)
        WHERE id = $6 RETURNING *`,
-      [name, department_id, level, role, is_active, req.params.id, team || null, start_date || null]
+      [name, department_id, level, role, is_active, req.params.id, team || null, start_date || null, position || null]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
