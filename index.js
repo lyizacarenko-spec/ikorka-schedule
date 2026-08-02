@@ -305,7 +305,18 @@ app.patch('/api/employees/:id', async (req, res) => {
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
+// ── ПОРЯДОК СПІВРОБІТНИКІВ (drag & drop) ──
+app.put('/api/employees/reorder', requireAuth, async (req, res) => {
+  try {
+    const { order } = req.body;   // [{id, sort_order}, ...]
+    if (!Array.isArray(order) || !order.length) return res.json({ ok: true, count: 0 });
+    for (const it of order) {
+      await q(`UPDATE employees SET sort_order=$1 WHERE id=$2`,
+              [parseInt(it.sort_order) || 0, parseInt(it.id)]);
+    }
+    res.json({ ok: true, count: order.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 // ── SCHEDULE ─────────────────────────────────────────────────
 app.get('/api/schedule', async (req, res) => {
   try {
