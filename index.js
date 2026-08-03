@@ -1382,7 +1382,7 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     const end   = new Date(y, m, 0).toISOString().slice(0,10);
 
     // всі активні співробітники зі схемою fixed_rate
-    llet empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date,
+    let empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date,
                          d.id AS dept_id, d.code AS dept_code, d.name AS dept_name,
                          s.scheme_type, s.base_rate, s.norm_days, s.norm_type, s.fixed_amount
                   FROM employees 
