@@ -721,14 +721,14 @@ app.get('/api/salary-schemes', async (_, res) => {
 
 app.put('/api/salary-schemes', requireAuth, async (req, res) => {
   try {
-    const { employee_id, scheme_type, base_rate, norm_days, norm_type } = req.body;
+    const { employee_id, scheme_type, base_rate, norm_days, norm_type, fixed_amount } = req.body;
     const rows = await q(
-      `INSERT INTO salary_schemes (employee_id, scheme_type, base_rate, norm_days, norm_type, updated_at)
-       VALUES ($1,$2,$3,$4,$5,NOW())
+      `INSERT INTO salary_schemes (employee_id, scheme_type, base_rate, norm_days, norm_type, fixed_amount, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,NOW())
        ON CONFLICT (employee_id)
-       DO UPDATE SET scheme_type=$2, base_rate=$3, norm_days=$4, norm_type=$5, updated_at=NOW()
+       DO UPDATE SET scheme_type=$2, base_rate=$3, norm_days=$4, norm_type=$5, fixed_amount=$6, updated_at=NOW()
        RETURNING *`,
-      [employee_id, scheme_type || 'fixed_rate', base_rate || 0, norm_days || 22, norm_type || 'fixed']
+      [employee_id, scheme_type || 'fixed_rate', base_rate || 0, norm_days || 22, norm_type || 'fixed', fixed_amount || 0]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
