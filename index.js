@@ -914,10 +914,10 @@ function buildMonthEntries(y, m, savedEntries, deptCode, empName, startDate) {
     const date = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const dow = new Date(y, m - 1, d).getDay();
     let status;
+   const startYmd = startDate ? (startDate.toISOString ? startDate.toISOString().slice(0,10) : String(startDate).slice(0,10)) : null;
     if (date in saved) status = saved[date];
-    else if (startDate && date < String(startDate).slice(0,10)) status = '';       // до старту порожньо
+    else if (startYmd && date < startYmd) status = '';       // до старту порожньо
     else status = defaultStatusFor(deptCode, dow, empName);
-    out.push({ entry_date: date, status });
   }
   return out;
 }
