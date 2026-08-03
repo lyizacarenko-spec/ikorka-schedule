@@ -890,12 +890,17 @@ const WORK_STATUSES = ['10-18','11-18','10-17','9:30-17:30','9-17','9-18','9-19'
 // Дефолтний статус за кодом відділу і днем тижня (дзеркало фронтенду)
 function defaultStatusFor(deptCode, dow, empName) {
   if (['refuse','reactivation'].includes(deptCode)) return '9:30-17:30';
+  if (empName === 'Климюк Марія') {
+    if (dow === 0 || dow === 6) return 'вих';        // нд, сб
+    if (dow === 4 || dow === 5) return 'удаленка';   // чт, пт
+    return '10-18';                                   // пн, вт, ср
+  }
   if (deptCode === 'admin' && empName === 'Мединська Ірина')
     return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
   if (deptCode === 'warehouse') return '9-19';
   if (deptCode === 'logistics') return dow === 0 ? 'вих' : '8:30-16:30';
-  if (['management','training','admin'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
+  if (['management','training','admin','marketing','it'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
   return '10-18';
 }
 
