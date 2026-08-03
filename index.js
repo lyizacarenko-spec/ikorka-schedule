@@ -1340,7 +1340,43 @@ app.put('/api/salary-period', requireAuth, async (req, res) => {
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+// Легкий розрахунок гарячих продажів для картки співробітника
+// (доступно всім, хто має can_salary на відділ hot — не потребує can_finance)
+app.get('/api/hot-calc', requireAuth, async (req, res) => {
+  try {
+    const employeeId = parseInt(req.query.employee_id);
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    const empRows = await q(
+      `SELECT e.id, e.name, e.start_date, d.code AS dept_code
+       FROM employees e JOIN departments d ON d.id = e.department_id
+       WHERE e.id = $1`, [employeeId]);
+    const emp = empRows[0];
+    if (!emp) return res.status(404).json({ error: 'Співробітник не знайдений' });
+    if (!canDept(req.user, emp.dept_code)) return res.status(403).json({ error: 'Немає доступу' });
 
+    const isInsta = (emp.name === 'Желюбовська Анастасія' || emp.name === 'Галаєва Анна');
+    const last = new Date(y, m, 0).getDate();
+    const sched = await q(
+      `SELECT entry_date, status FROM schedule_entries WHERE employee_id=$1 AND entry_date >= $2 AND entry_date <= $3`,
+      [employeeId, `${y}-${String(m).padStart(2,'0')}-01`, `${y}-${String(m).padStart(2,'0')}-${String(last).padStart(2,'0')}`]);
+    const savedList = sched.map(r => ({
+      entry_date: r.entry_date.toISOString ? r.entry_date.toISOString().slice(0,10) : String(r.entry_date).slice(0,10),
+      status: r.status
+    }));
+    const monthEntries = buildMonthEntries(y, m, savedList, emp.dept_code, emp.name, emp.start_date);
+
+    const pRows = await q(`SELECT * FROM salary_period WHERE employee_id=$1 AND calc_year=$2 AND calc_month=$3`, [employeeId, y, m]);
+    const ps = {}; pRows.forEach(r => { ps[r.period_no] = r; });
+
+    const r1 = periodRange(y, m, 1), r2 = periodRange(y, m, 2);
+    const ent1 = monthEntries.filter(e => e.entry_date >= r1.from && e.entry_date <= r1.to);
+    const ent2 = monthEntries.filter(e => e.entry_date >= r2.from && e.entry_date <= r2.to);
+    const c1 = computeHotPeriod(ent1, ps[1], isInsta);
+    const c2 = computeHotPeriod(ent2, ps[2], isInsta);
+    res.json({ period1: c1, period2: c2 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 // ── РОП: дані мотивації (вводить РОП або комерційний директор) ──
 app.get('/api/rop-salary', async (req, res) => {
   try {
