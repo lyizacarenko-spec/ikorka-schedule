@@ -918,6 +918,7 @@ function buildMonthEntries(y, m, savedEntries, deptCode, empName, startDate) {
     if (date in saved) status = saved[date];
     else if (startYmd && date < startYmd) status = '';       // до старту порожньо
     else status = defaultStatusFor(deptCode, dow, empName);
+    out.push({ entry_date: date, status });
   }
   return out;
 }
