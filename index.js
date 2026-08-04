@@ -1712,6 +1712,34 @@ app.get('/api/finance', requireFinance, async (req, res) => {
           ...sc,
         };
       }
+     if (emp.scheme_type === 'mentor') {
+        const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
+        const fixScheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
+        const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date);
+        const mRow = mentorByEmp[emp.id] || {};
+        const avgScore = parseFloat(mRow.avg_score) || 0;
+        const groupIe = parseFloat(mRow.group_ie) || 0;
+        const qBonus = mentorQualityBonus(avgScore);
+        const iBonus = mentorIeBonus(groupIe);
+        const adjList = adjByEmp[emp.id] || [];
+        const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        const total = fixCalc.total + qBonus + iBonus + adjTotal;
+        const payout1 = fixCalc.payout1;
+        const payout2 = total - payout1;
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: 'mentor',
+          base_rate: emp.base_rate, worked_days: fixCalc.worked_days, diff_days: fixCalc.diff_days,
+          avg_score: avgScore, group_ie: groupIe,
+          quality_bonus: qBonus, ie_bonus: iBonus,
+          adj_total: adjTotal, adjustments: adjList,
+          total, payout1, payout2,
+          pay_schedule: 'staff',
+          advance: payout1, remainder: payout2,
+        };
+      }
       const scheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
       const hasScheme = emp.scheme_type === 'fixed_rate' && emp.base_rate > 0;
       if (!hasScheme) {
