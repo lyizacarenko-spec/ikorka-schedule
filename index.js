@@ -1537,6 +1537,12 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     const ropByEmp = {};
     ropRows.forEach(r => { ropByEmp[r.employee_id] = r; });
 
+    // Наставник — середній бал тесту / ІЕ групи
+    let mentorRows = [];
+    try { mentorRows = await q(`SELECT * FROM mentor_salary WHERE calc_year=$1 AND calc_month=$2`, [y, m]); }
+    catch (e) { mentorRows = []; }
+    const mentorByEmp = {};
+    mentorRows.forEach(r => { mentorByEmp[r.employee_id] = r; });
     // гарячі продажі — суми по періодах
     let perRows = [];
     try {
