@@ -1109,6 +1109,23 @@ function ropHotOverPct(over) {
   return Math.min(50 + (o - 10) * 5, 80);   // +5% за кожен % понад 10, стеля 80%
 }
 
+// ═══════════════════════════════════════════════════════════
+// НАСТАВНИК — бонус за якість (середній бал тесту) + бонус за ІЕ групи
+// ═══════════════════════════════════════════════════════════
+function mentorQualityBonus(score) {
+  const s = parseFloat(score) || 0;
+  if (s <= 60) return 0;
+  if (s <= 70) return 10000;
+  if (s <= 78) return 11000;
+  return 12000;   // 79-87 і вище — стеля 12000
+}
+function mentorIeBonus(ie) {
+  const v = parseFloat(ie) || 0;
+  if (v >= 1.07) return 6000;
+  if (v >= 0.90) return 4000;
+  return 0;
+}
+
 function computeRopSalary(deptCode, row) {
   const C = ROP_CFG[deptCode];
   if (!C) return null;
