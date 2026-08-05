@@ -1251,7 +1251,7 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate)
 
   // відпрацьовані зміни за графіком
   let worked = 0;
-  entries.forEach(e => { if (WORK_STATUSES.includes(e.status)) worked += 1; });
+  entries.forEach(e => { if (isWorkStatus(e.status)) worked += 1; });
 
   const diff = worked - targetDays;                 // + переробка / − недопрацював
   const dayAdjust = diff * dayPrice;
