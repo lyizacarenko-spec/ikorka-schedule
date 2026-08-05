@@ -886,6 +886,10 @@ app.put('/api/hourly/daily', async (req, res) => {
 // вих / больн / відпуск / навч — НЕ зміни.
 // ═══════════════════════════════════════════════════════════
 const WORK_STATUSES = ['10-18','11-18','10-17','9:30-17:30','9-17','9-18','9-19','9-19:30','8:30-16:30','удаленка','запізн','відробіт'];
+function isWorkStatus(status) {
+  if (WORK_STATUSES.includes(status)) return true;
+  return /^\d{1,2}(:\d{2})?-\d{1,2}(:\d{2})?$/.test(status || '');   // довільний час "9-17", "10:15-18:30" тощо
+}
 
 // Дефолтний статус за кодом відділу і днем тижня (дзеркало фронтенду)
 function defaultStatusFor(deptCode, dow, empName) {
@@ -927,7 +931,7 @@ function buildMonthEntries(y, m, savedEntries, deptCode, empName, startDate) {
 function countWorkAndTrain(entries) {
   let worked = 0, train = 0;
   (entries || []).forEach(e => {
-    if (WORK_STATUSES.includes(e.status)) worked += 1;
+    if (isWorkStatus(e.status)) worked += 1;
     else if (e.status === 'навч') train += 1;
   });
   return { worked, train };
