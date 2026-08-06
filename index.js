@@ -1577,6 +1577,13 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     catch (e) { mentorRows = []; }
     const mentorByEmp = {};
     mentorRows.forEach(r => { mentorByEmp[r.employee_id] = r; });
+
+    // Рекрутер — кандидати на навчання/продажі + доплата адмін
+    let recruiterRows = [];
+    try { recruiterRows = await q(`SELECT * FROM recruiter_salary WHERE calc_year=$1 AND calc_month=$2`, [y, m]); }
+    catch (e) { recruiterRows = []; }
+    const recruiterByEmp = {};
+    recruiterRows.forEach(r => { recruiterByEmp[r.employee_id] = r; });
     // гарячі продажі — суми по періодах
     let perRows = [];
     try {
