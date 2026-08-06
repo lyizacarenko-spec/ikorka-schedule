@@ -1462,6 +1462,36 @@ app.put('/api/mentor-salary', requireAuth, async (req, res) => {
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// — Рекрутер (Саєнко Аліна): кандидати на навчання/продажі + доплата адмін —
+app.get('/api/recruiter-salary', async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM recruiter_salary WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (req.query.employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(req.query.employee_id)); }
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/recruiter-salary', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const { employee_id, calc_year, calc_month, train_candidates, sales_candidates, admin_bonus } = req.body;
+    const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
+    if (empRow.length && !canDept(req.user, empRow[0].code))
+      return res.status(403).json({ error: 'Немає доступу до цього відділу' });
+    const rows = await q(
+      `INSERT INTO recruiter_salary (employee_id, calc_year, calc_month, train_candidates, sales_candidates, admin_bonus, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month)
+       DO UPDATE SET train_candidates=$4, sales_candidates=$5, admin_bonus=$6, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, train_candidates||0, sales_candidates||0, admin_bonus||0]);
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 // GET /api/finance?year=2026&month=9[&dept=admin]
 // Повертає порахований підсумок ЗП по кожному ставочнику + агрегати по відділах
 app.get('/api/finance', requireFinance, async (req, res) => {
