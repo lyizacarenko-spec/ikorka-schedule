@@ -1101,7 +1101,7 @@ function computeSalesSalary(salRow, isOrder, opts) {
 // ═══════════════════════════════════════════════════════════
 const ROP_CFG = {
   rzpk:   { rate: 15000, kpi: 5000, plan_bonus: 10000, own_pct: 0.05, mode: 'prop'  },
-  refuse: { rate: 15000, kpi: 5000, plan_bonus: 5000,  own_pct: 0.05, mode: 'prop'  },
+  refuse: { rate: 15000, kpi: 5000, plan_bonus: 5000,  own_pct: 0.07, mode: 'prop'  },
   hot:    { rate: 15000, kpi: 7500, plan_bonus: 0,     own_pct: 0,    mode: 'scale' },
 };
 // Шкала перевиконання для РОПа гарячої бази (% від ставки)
