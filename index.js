@@ -1787,6 +1787,35 @@ app.get('/api/finance', requireFinance, async (req, res) => {
           advance: payout1, remainder: payout2,
         };
       }
+      if (emp.scheme_type === 'recruiter') {
+        const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
+        const fixScheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
+        const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date);
+        const rRow = recruiterByEmp[emp.id] || {};
+        const trainCandidates = parseInt(rRow.train_candidates) || 0;
+        const salesCandidates = parseInt(rRow.sales_candidates) || 0;
+        const adminBonus = parseFloat(rRow.admin_bonus) || 0;
+        const trainBonus = trainCandidates * 200;
+        const salesBonus = salesCandidates * 600;
+        const adjList = adjByEmp[emp.id] || [];
+        const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        const total = fixCalc.total + trainBonus + salesBonus + adminBonus + adjTotal;
+        const payout1 = fixCalc.payout1;
+        const payout2 = total - payout1;
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: 'recruiter',
+          base_rate: emp.base_rate, worked_days: fixCalc.worked_days, diff_days: fixCalc.diff_days,
+          train_candidates: trainCandidates, sales_candidates: salesCandidates,
+          train_bonus: trainBonus, sales_bonus: salesBonus, admin_bonus: adminBonus,
+          adj_total: adjTotal, adjustments: adjList,
+          total, payout1, payout2,
+          pay_schedule: 'staff',
+          advance: payout1, remainder: payout2,
+        };
+      }
       const scheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
       const hasScheme = emp.scheme_type === 'fixed_rate' && emp.base_rate > 0;
       if (!hasScheme) {
