@@ -1155,9 +1155,9 @@ function computeRopSalary(deptCode, row) {
   }
 
   // Відсоток з особистих замовлень
-  let payOwn = 0;
+let payOwn = 0;
   if (deptCode === 'hot') {
-    payOwn = (parseFloat(r.own_hot) || 0) * 0.015 + (parseFloat(r.own_cold) || 0) * 0.05;
+    payOwn = (parseFloat(r.own_hot) || 0) * 0.02 + (parseFloat(r.own_cold) || 0) * 0.05;
   } else {
     payOwn = (parseFloat(r.own_sum) || 0) * C.own_pct;
   }
