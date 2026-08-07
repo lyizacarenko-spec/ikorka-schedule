@@ -1816,6 +1816,32 @@ app.get('/api/finance', requireFinance, async (req, res) => {
           advance: payout1, remainder: payout2,
         };
       }
+      // вантажник з фіксом: 5000 завжди (незалежно від графіка) + години × ставка
+      if (emp.scheme_type === 'hourly_fixed') {
+        const rate = parseFloat(emp.base_rate) || 150;
+        const fixedAmount = parseFloat(emp.fixed_amount) || 0;
+        const list = hrByEmp[emp.id] || [];
+        let hours = 0; list.forEach(r => hours += parseFloat(r.hours) || 0);
+        const hourPay = hours * rate;
+        const adjList2 = adjByEmp[emp.id] || [];
+        const adjTotal2 = adjList2.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        const total2 = fixedAmount + hourPay + adjTotal2;
+        const payout1b = fixedAmount / 2;
+        const payout2b = total2 - payout1b;
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: 'hourly_fixed',
+          base_rate: rate, fixed_amount: fixedAmount,
+          worked_days: list.length, diff_days: 0,
+          hours_total: hours, hour_pay: hourPay,
+          adj_total: adjTotal2, adjustments: adjList2,
+          total: total2, payout1: payout1b, payout2: payout2b,
+          pay_schedule: 'staff',
+          advance: payout1b, remainder: payout2b,
+        };
+      }
       const scheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
       const hasScheme = emp.scheme_type === 'fixed_rate' && emp.base_rate > 0;
       if (!hasScheme) {
