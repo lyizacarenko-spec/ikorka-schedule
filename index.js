@@ -628,13 +628,16 @@ app.post('/api/export/salary', async (req, res) => {
     // рядки для решти відділів (усі схеми, крім percent_plan/orders_count —
     // ті вже покриті вкладкою продажів вище) — та сама логіка, що й на сторінці
     // «Фінанси» (computeFinanceRows), тож суми завжди збігаються.
-    // Гарячі продажі (hot) і РОП (rop) сюди теж потрапляють — раніше вони
-    // взагалі не траплялись в експорт ЗП (не мали рядка в salary_calc).
-    const otherRows = (await computeFinanceRows(y, m, dept))
-      .filter(r => r.total != null
-        && !['percent_plan', 'orders_count'].includes(r.scheme_type));
+    // РОП сюди теж потрапляє — раніше він взагалі не траплявся в експорт ЗП
+    // (не мав рядка в salary_calc). Гарячі продажі (hot) винесені в окрему
+    // вкладку нижче — у них 14 компонентів (7 на період × 2 періоди),
+    // в узагальнені 4 слоти цієї вкладки вони б не влізли.
+    const financeRows = await computeFinanceRows(y, m, dept);
+    const otherRows = financeRows.filter(r => r.total != null
+      && !['percent_plan', 'orders_count', 'hot'].includes(r.scheme_type));
+    const hotRows = financeRows.filter(r => r.total != null && r.scheme_type === 'hot');
 
-    if (!salaries.length && !otherRows.length) {
+    if (!salaries.length && !otherRows.length && !hotRows.length) {
       return res.json({ ok:false, message:'Немає даних ЗП за цей місяць' });
     }
 
@@ -768,11 +771,56 @@ app.post('/api/export/salary', async (req, res) => {
       otherCount = otherRows.length;
     }
 
+    // ── третя вкладка: гарячі продажі окремо — фіксовані 14 колонок компонентів
+    //    (7 на період 1-14 + 7 на період 15-кінець), бо в 4 узагальнені слоти
+    //    вкладки «(інші)» ця схема не влізає. Кожна колонка — завжди той самий
+    //    компонент на тому самому місці (нулі не приховуються, щоб не зсунути
+    //    сусідні колонки).
+    let hotTab = null, hotCount = 0;
+    if (hotRows.length) {
+      hotTab = `${tabName} (гарячі)`;
+      try {
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: SHEET_ID,
+          resource: { requests: [{ addSheet: { properties: { title: hotTab } } }] }
+        });
+      } catch (e) { /* вкладка вже є — ок */ }
+
+      const hotHeader = [
+        [`ЗП ${MONTHS[m]} ${y} — гарячі продажі`,'','','','','','','','','','','','','','','','','','','',''],
+        ['ІМЯ','Відділ','Рівень',
+         'П1: Ставка','П1: ОФІС1345 %','П1: Паста %','П1: ОФІС2 %','П1: Акція230 %','П1: Доплата','П1: Штраф',
+         'П2: Ставка','П2: ОФІС1345 %','П2: Паста %','П2: ОФІС2 %','П2: Акція230 %','П2: Доплата','П2: Штраф',
+         'Корегування','Виплата1','Виплата2','РАЗОМ'],
+      ];
+      const hotDataRows = hotRows.map(r => {
+        const p1 = r.period1 || {}, p2 = r.period2 || {};
+        return [
+          r.name, r.dept_name, LEVEL[r.level] || r.level,
+          p1.rate || 0, p1.pay_office || 0, p1.pay_pasta || 0, p1.pay_office2 || 0, p1.pay_action || 0, p1.bonus || 0, p1.penalty || 0,
+          p2.rate || 0, p2.pay_office || 0, p2.pay_pasta || 0, p2.pay_office2 || 0, p2.pay_action || 0, p2.bonus || 0, p2.penalty || 0,
+          r.adj_total || '',
+          r.payout1 != null ? r.payout1 : '',
+          r.payout2 != null ? r.payout2 : '',
+          r.total,
+        ];
+      });
+      const hotValues = [...hotHeader, ...hotDataRows];
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${hotTab}!A1`,
+        valueInputOption: 'USER_ENTERED',
+        resource: { values: hotValues },
+      });
+      hotCount = hotRows.length;
+    }
+
     res.json({
       ok: true,
       message: `Експортовано ${salaries.length} рядків у "${tabName}"`
-        + (otherCount ? ` та ${otherCount} рядків у "${otherTab}"` : ''),
-      tab: tabName, other_tab: otherTab,
+        + (otherCount ? ` та ${otherCount} рядків у "${otherTab}"` : '')
+        + (hotCount ? ` та ${hotCount} рядків у "${hotTab}"` : ''),
+      tab: tabName, other_tab: otherTab, hot_tab: hotTab,
     });
   } catch(e) {
     console.error('Sheets export error:', e.message);
