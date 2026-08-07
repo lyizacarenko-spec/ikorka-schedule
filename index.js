@@ -1308,18 +1308,20 @@ app.get('/api/payout-status', requireFinance, async (req, res) => {
 
 app.put('/api/payout-status', requireFinance, async (req, res) => {
   try {
-    const { employee_id, calc_year, calc_month, payout_no, paid, amount_override, comment } = req.body;
+    const { employee_id, calc_year, calc_month, payout_no, paid, comment } = req.body;
+    const overrideProvided = Object.prototype.hasOwnProperty.call(req.body, 'amount_override');
+    const overrideVal = (req.body.amount_override === '' || req.body.amount_override == null) ? null : req.body.amount_override;
     const rows = await q(
       `INSERT INTO payout_status (employee_id, calc_year, calc_month, payout_no, paid, amount_override, paid_at, comment, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $5 THEN NOW() ELSE NULL END, $7, NOW())
        ON CONFLICT (employee_id, calc_year, calc_month, payout_no)
-       DO UPDATE SET paid=$5, amount_override=$6,
+       DO UPDATE SET paid=$5,
+                     amount_override = CASE WHEN $8 THEN $6 ELSE payout_status.amount_override END,
                      paid_at = CASE WHEN $5 THEN COALESCE(payout_status.paid_at, NOW()) ELSE NULL END,
                      comment=$7, updated_at=NOW()
        RETURNING *`,
       [employee_id, calc_year, calc_month, payout_no,
-       paid === true, (amount_override === '' || amount_override == null) ? null : amount_override,
-       comment || null]
+       paid === true, overrideVal, comment || null, overrideProvided]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
