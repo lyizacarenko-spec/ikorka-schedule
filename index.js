@@ -1929,12 +1929,12 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
       d = endDay + 1;
     }
 
-    // склад-співробітники (piece_warehouse + hourly + warehouse_hybrid)
+    // склад-співробітники (piece_warehouse + hourly + hourly_fixed + warehouse_hybrid)
     const emps = await q(
       `SELECT e.id, e.name, s.scheme_type, s.base_rate
        FROM employees e
        JOIN salary_schemes s ON s.employee_id = e.id
-       WHERE e.is_active = true AND s.scheme_type IN ('piece_warehouse','hourly','warehouse_hybrid')
+       WHERE e.is_active = true AND s.scheme_type IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid')
        ORDER BY e.name`);
     // мапа схем для правильного підрахунку (гібрид рахує ТІЛЬКИ фасовку у тижнях)
     const schemeById = {}; emps.forEach(e => { schemeById[e.id] = e.scheme_type; });
