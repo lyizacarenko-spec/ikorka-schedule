@@ -604,7 +604,7 @@ app.post('/api/export/salary', async (req, res) => {
     const m = parseInt(month || new Date().getMonth() + 1);
 
     let sql = `
-      SELECT e.name, e.level, e.role, d.code AS dept_code, d.name AS dept_name,
+      SELECT e.id AS employee_id, e.name, e.level, e.role, d.code AS dept_code, d.name AS dept_name,
              sc.plan_amount, sc.fact_amount, sc.returns_pct, sc.worked_days,
              sc.senior_bonus, sc.penalty, sc.note,
              sc.updated_at
@@ -617,7 +617,26 @@ app.post('/api/export/salary', async (req, res) => {
     sql += ' ORDER BY d.id, e.name';
 
     const salaries = await q(sql, params);
-    if(!salaries.length){ return res.json({ok:false,message:'Немає даних ЗП за цей місяць'}); }
+
+    // корегування ЗП за місяць (для інформаційної колонки — у формулу РАЗОМ нижче
+    // свідомо НЕ додаємо, щоб не змінити вже перевірений підсумок продажного розрахунку)
+    const adjRows = await q(
+      `SELECT * FROM salary_adjustments WHERE calc_year=$1 AND calc_month=$2 ORDER BY created_at`, [y, m]);
+    const adjByEmpId = {};
+    adjRows.forEach(a => { (adjByEmpId[a.employee_id] = adjByEmpId[a.employee_id] || []).push(a); });
+
+    // рядки для решти відділів (усі схеми, крім percent_plan/orders_count —
+    // ті вже покриті вкладкою продажів вище) — та сама логіка, що й на сторінці
+    // «Фінанси» (computeFinanceRows), тож суми завжди збігаються.
+    // Гарячі продажі (hot) і РОП (rop) сюди теж потрапляють — раніше вони
+    // взагалі не траплялись в експорт ЗП (не мали рядка в salary_calc).
+    const otherRows = (await computeFinanceRows(y, m, dept))
+      .filter(r => r.total != null
+        && !['percent_plan', 'orders_count'].includes(r.scheme_type));
+
+    if (!salaries.length && !otherRows.length) {
+      return res.json({ ok:false, message:'Немає даних ЗП за цей місяць' });
+    }
 
     const sheets = await getSheetsClient();
     const tabName = sheet_name || `ЗП ${m}.${y}`;
@@ -633,8 +652,8 @@ app.post('/api/export/salary', async (req, res) => {
 
     const MONTHS = ['','Січень','Лютий','Березень','Квітень','Травень','Червень','Липень','Серпень','Вересень','Жовтень','Листопад','Грудень'];
     const header = [
-      [`ЗП ${MONTHS[m]} ${y}`,'','','','','','','','','','','',''],
-      ['ІМЯ','Відділ','Рівень','Кол роб.днів','План','Оборот','% повернень','Ставка','Бонус %','% бонус грн','Переробка','Доплата','Штраф','Примітка','РАЗОМ']
+      [`ЗП ${MONTHS[m]} ${y} — продажі/відмови`,'','','','','','','','','','','','','',''],
+      ['ІМЯ','Відділ','Рівень','Кол роб.днів','План','Оборот','% повернень','Ставка','Бонус %','% бонус грн','Переробка','Доплата','Штраф','Корегування','Примітка','РАЗОМ']
     ];
 
     const NORM_DAYS = 22;
@@ -670,7 +689,9 @@ app.post('/api/export/salary', async (req, res) => {
       const overtime = Math.max(0,days-NORM_DAYS)*(isOrderDept?450:400);
       const senior = parseFloat(s.senior_bonus)||0;
       const penalty = parseFloat(s.penalty)||0;
-      const total = rate+bonus+overtime+senior-penalty;
+      const total = rate+bonus+overtime+senior-penalty;   // формула НЕ змінена
+      const adjList = adjByEmpId[s.employee_id] || [];
+      const adjTotal = adjList.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
 
       return [
         s.name,
@@ -686,6 +707,7 @@ app.post('/api/export/salary', async (req, res) => {
         overtime||'',
         senior||'',
         penalty||'',
+        adjTotal||'',
         s.note||'',
         total
       ];
@@ -700,7 +722,58 @@ app.post('/api/export/salary', async (req, res) => {
       resource: { values }
     });
 
-    res.json({ ok: true, message: `Експортовано ${salaries.length} рядків у вкладку "${tabName}"`, tab: tabName });
+    // ── друга вкладка: решта відділів (ставочники, наставник, рекрутер,
+    //    склад, гарячі продажі, РОП…) — з деталізацією по компонентах ──
+    let otherTab = null, otherCount = 0;
+    if (otherRows.length) {
+      otherTab = `${tabName} (інші)`;
+      try {
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: SHEET_ID,
+          resource: { requests: [{ addSheet: { properties: { title: otherTab } } }] }
+        });
+      } catch (e) { /* вкладка вже є — ок */ }
+
+      const SCHEME_LABEL = {
+        fixed_rate: 'Ставочник', mentor: 'Наставник', recruiter: 'Рекрутер',
+        hourly: 'Вантажник (год.)', hourly_fixed: 'Вантажник (фікс+год.)',
+        piece_warehouse: 'Склад-відрядник', warehouse_hybrid: 'Начальник складу',
+        hot: 'Гарячі продажі', rop: 'РОП',
+      };
+      const otherHeader = [
+        [`ЗП ${MONTHS[m]} ${y} — інші відділи`,'','','','','','','','','','','','','',''],
+        ['ІМЯ','Відділ','Рівень','Схема',
+         'Компонент 1','Сума 1','Компонент 2','Сума 2','Компонент 3','Сума 3','Компонент 4','Сума 4',
+         'Корегування','Виплата1','Виплата2','РАЗОМ'],
+      ];
+      const otherDataRows = otherRows.map(r => {
+        const items = r.breakdown_components || [];
+        const slots = [0, 1, 2, 3].map(i => items[i] || null);
+        return [
+          r.name, r.dept_name, LEVEL[r.level] || r.level, SCHEME_LABEL[r.scheme_type] || r.scheme_type,
+          ...slots.flatMap(it => [it ? it.label : '', it ? it.amount : '']),
+          r.adj_total || '',
+          r.payout1 != null ? r.payout1 : (r.advance != null ? r.advance : ''),
+          r.payout2 != null ? r.payout2 : (r.remainder != null ? r.remainder : ''),
+          r.total,
+        ];
+      });
+      const otherValues = [...otherHeader, ...otherDataRows];
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${otherTab}!A1`,
+        valueInputOption: 'USER_ENTERED',
+        resource: { values: otherValues },
+      });
+      otherCount = otherRows.length;
+    }
+
+    res.json({
+      ok: true,
+      message: `Експортовано ${salaries.length} рядків у "${tabName}"`
+        + (otherCount ? ` та ${otherCount} рядків у "${otherTab}"` : ''),
+      tab: tabName, other_tab: otherTab,
+    });
   } catch(e) {
     console.error('Sheets export error:', e.message);
     res.status(500).json({ error: e.message });
@@ -1293,6 +1366,108 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate)
 }
 
 // ═══════════════════════════════════════════════════════════
+// ДЕТАЛІЗАЦІЯ ЗП: розбити готовий рядок /api/finance на компоненти
+// (ставка, кожен бонус окремо, корегування) — не чіпає total/payout1/payout2,
+// лише читає вже пораховані поля з рядка.
+// Повертає { components, adjustments, all } — components = ставка/бонуси
+// по типу схеми, adjustments = ручні корегування (salary_adjustments) окремо,
+// all = components.concat(adjustments) — зручно для суцільного списку в UI.
+// Нулі й undefined пропускаються.
+// ═══════════════════════════════════════════════════════════
+function buildBreakdown(r) {
+  const items = [];
+  const push = (label, amount) => {
+    if (amount === undefined || amount === null) return;
+    const v = parseFloat(amount) || 0;
+    if (v !== 0) items.push({ label, amount: v });
+  };
+
+  switch (r.scheme_type) {
+    case 'fixed_rate':
+      push('Оклад', r.base_rate);
+      push(r.diff_days >= 0 ? 'Переробка' : 'Недопрацьовано', r.day_adjust);
+      break;
+    case 'warehouse_hybrid':
+      push('Фікс (оклад ± переробка)', r.fix_total);
+      push('Фасовка (скло/пластик)', r.piece_total);
+      break;
+    case 'piece_warehouse':
+      push('Упаковка', r.pack_total);
+      push('Фасовка', r.fas_total);
+      push('Вихід', r.exit_total);
+      break;
+    case 'hourly':
+      push('Години × ставка', r.hour_pay);
+      break;
+    case 'hourly_fixed':
+      push('Фікс', r.fixed_amount);
+      push('Години × ставка', r.hour_pay);
+      break;
+    case 'hot': {
+      const p1 = r.period1 || {}, p2 = r.period2 || {};
+      push('Ставка (1-14)', p1.rate);
+      push('ОФІС1345 % (1-14)', p1.pay_office);
+      push('Паста % (1-14)', p1.pay_pasta);
+      push('ОФІС2 % (1-14)', p1.pay_office2);
+      push('Акція230 % (1-14)', p1.pay_action);
+      push('Доплата (1-14)', p1.bonus);
+      push('Штраф (1-14)', p1.penalty ? -p1.penalty : 0);
+      push('Ставка (15-кінець)', p2.rate);
+      push('ОФІС1345 % (15-кінець)', p2.pay_office);
+      push('Паста % (15-кінець)', p2.pay_pasta);
+      push('ОФІС2 % (15-кінець)', p2.pay_office2);
+      push('Акція230 % (15-кінець)', p2.pay_action);
+      push('Доплата (15-кінець)', p2.bonus);
+      push('Штраф (15-кінець)', p2.penalty ? -p2.penalty : 0);
+      break;
+    }
+    case 'rop':
+      push('Ставка', r.rate);
+      push('KPI (СРЧ + апрув)', r.pay_kpi);
+      push('Бонус за план', r.pay_plan);
+      push('% з особистих замовлень', r.pay_own);
+      push('Доплата', r.bonus);
+      push('Штраф', r.penalty ? -r.penalty : 0);
+      break;
+    case 'percent_plan':
+    case 'orders_count':
+      if (r.advance_stage) {
+        push('Аванс', r.advance);
+        break;
+      }
+      push('Ставка', r.rate);
+      push(`% від обороту (${r.bonus_pct}%)`, r.bonus);
+      push('Переробка', r.overtime);
+      push('Навчання', r.train_pay);
+      push('Доплата', r.senior_bonus);
+      push('Штраф', r.penalty ? -r.penalty : 0);
+      break;
+    case 'mentor':
+      push('Оклад (± переробка)', r.fix_total);
+      push('Бонус за якість тесту', r.quality_bonus);
+      push('Бонус за ІЕ групи', r.ie_bonus);
+      break;
+    case 'recruiter':
+      push('Оклад (± переробка)', r.fix_total);
+      push('Кандидати на навчання', r.train_bonus);
+      push('Кандидати у продажі', r.sales_bonus);
+      push('Адмін-доплата', r.admin_bonus);
+      break;
+    default:
+      break;
+  }
+
+  const adjItems = [];
+  (r.adjustments || []).forEach(a => {
+    const amount = parseFloat(a.amount) || 0;
+    if (amount === 0) return;
+    adjItems.push({ label: a.comment || a.type || 'Корегування', amount });
+  });
+
+  return { components: items, adjustments: adjItems, all: items.concat(adjItems) };
+}
+
+// ═══════════════════════════════════════════════════════════
 // СТАТУС ВИПЛАТ (для бухгалтера): галочка «виплачено» + ручна сума
 // payout_no: 1 = перша виплата (аванс), 2 = друга (залишок)
 // amount_override: якщо задано — використовується замість розрахованої
@@ -1496,11 +1671,13 @@ app.put('/api/recruiter-salary', requireAuth, async (req, res) => {
 });
 // GET /api/finance?year=2026&month=9[&dept=admin]
 // Повертає порахований підсумок ЗП по кожному ставочнику + агрегати по відділах
-app.get('/api/finance', requireFinance, async (req, res) => {
-  try {
-    const { year, month, dept } = req.query;
-    const y = parseInt(year || new Date().getFullYear());
-    const m = parseInt(month || new Date().getMonth() + 1);
+// ═══════════════════════════════════════════════════════════
+// Побудова рядків фінансового розрахунку за місяць (усі схеми ЗП,
+// з деталізацією по компонентах). Використовується і в /api/finance,
+// і в /api/export/salary — щоб суми в дашборді й в експорті завжди
+// збігались (одна логіка розрахунку, не дублюємо формули).
+// ═══════════════════════════════════════════════════════════
+async function computeFinanceRows(y, m, dept) {
     const start = `${y}-${String(m).padStart(2,'0')}-01`;
     const end   = new Date(y, m, 0).toISOString().slice(0,10);
 
@@ -1648,7 +1825,11 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       // склад-відрядник: сума за днями
       if (emp.scheme_type === 'piece_warehouse') {
         const list = whByEmp[emp.id] || [];
-        let whTotal = 0; list.forEach(r => whTotal += warehouseDayAmount(r).total);
+        let whTotal = 0, packTotal = 0, fasTotal = 0, exitTotal = 0;
+        list.forEach(r => {
+          const a = warehouseDayAmount(r);
+          whTotal += a.total; packTotal += a.pack; fasTotal += a.fasovka; exitTotal += a.exit;
+        });
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
         const total = whTotal + adjTotal;
@@ -1659,6 +1840,7 @@ app.get('/api/finance', requireFinance, async (req, res) => {
           scheme_type: 'piece_warehouse',
           base_rate: 0, worked_days: list.length, diff_days: 0,
           piece_total: whTotal,
+          pack_total: packTotal, fas_total: fasTotal, exit_total: exitTotal,
           adj_total: adjTotal, adjustments: adjList,
           total, advance: 0, remainder: total,
         };
@@ -1781,6 +1963,7 @@ app.get('/api/finance', requireFinance, async (req, res) => {
           role: emp.role, level: emp.level,
           scheme_type: 'mentor',
           base_rate: emp.base_rate, worked_days: fixCalc.worked_days, diff_days: fixCalc.diff_days,
+          fix_total: fixCalc.total,
           avg_score: avgScore, group_ie: groupIe,
           quality_bonus: qBonus, ie_bonus: iBonus,
           adj_total: adjTotal, adjustments: adjList,
@@ -1810,6 +1993,7 @@ app.get('/api/finance', requireFinance, async (req, res) => {
           role: emp.role, level: emp.level,
           scheme_type: 'recruiter',
           base_rate: emp.base_rate, worked_days: fixCalc.worked_days, diff_days: fixCalc.diff_days,
+          fix_total: fixCalc.total,
           train_candidates: trainCandidates, sales_candidates: salesCandidates,
           train_bonus: trainBonus, sales_bonus: salesBonus, admin_bonus: adminBonus,
           adj_total: adjTotal, adjustments: adjList,
@@ -1866,6 +2050,33 @@ app.get('/api/finance', requireFinance, async (req, res) => {
         start_date: emp.start_date,
         ...calc,
       };
+    });
+
+    // деталізація по компонентах (ставка, кожен бонус, корегування) — не чіпає total/payout1/payout2
+    rows.forEach(r => {
+      const b = buildBreakdown(r);
+      r.breakdown = b.all;                 // суцільний список (для UI)
+      r.breakdown_components = b.components; // без корегувань (для експорту в колонки)
+    });
+
+    return rows;
+}
+
+app.get('/api/finance', requireFinance, async (req, res) => {
+  try {
+    const { year, month, dept } = req.query;
+    const y = parseInt(year || new Date().getFullYear());
+    const m = parseInt(month || new Date().getMonth() + 1);
+    const rows = await computeFinanceRows(y, m, dept);
+
+    // статуси виплат (галочка бухгалтера + ручні суми)
+    let payStat = [];
+    try {
+      payStat = await q(`SELECT * FROM payout_status WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+    } catch (e) { payStat = []; }   // таблиці ще нема — не падаємо
+    const payByEmp = {};
+    payStat.forEach(p => {
+      (payByEmp[p.employee_id] = payByEmp[p.employee_id] || {})[p.payout_no] = p;
     });
 
     // приклеїти статуси виплат + ручні суми (override має пріоритет)
