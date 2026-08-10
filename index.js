@@ -2205,42 +2205,98 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     const wh = await q(`SELECT * FROM warehouse_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
     const hr = await q(`SELECT * FROM hourly_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
 
-    // сума по співробітнику по днях
-    const dayAmt = {}; // "empId_day" -> сума
+    // компоненти суми по співробітнику по днях (щоб і сума, і деталізація
+    // рахувались з тих самих чисел — сума в тижні не зміниться)
+    const dayComp = {}; // "empId_day" -> {pack,fasovka,exit,hourPay,hours}
+    const addComp = (key, patch) => {
+      const c = dayComp[key] = dayComp[key] || { pack: 0, fasovka: 0, exit: 0, hourPay: 0, hours: 0 };
+      Object.keys(patch).forEach(k => { c[k] += patch[k]; });
+    };
     wh.forEach(r => {
       const day = parseInt(String(r.work_date).slice(8,10));
+      const key = `${r.employee_id}_${day}`;
       // для гібрида (начальник складу) — лише фасовка; для відрядників — повна сума дня
-      const amt = schemeById[r.employee_id] === 'warehouse_hybrid'
-        ? fasovkaDayAmount(r)
-        : warehouseDayAmount(r).total;
-      dayAmt[`${r.employee_id}_${day}`] = (dayAmt[`${r.employee_id}_${day}`]||0) + amt;
+      if (schemeById[r.employee_id] === 'warehouse_hybrid') {
+        addComp(key, { pack: 0, fasovka: fasovkaDayAmount(r), exit: 0, hourPay: 0, hours: 0 });
+      } else {
+        const calc = warehouseDayAmount(r);
+        addComp(key, { pack: calc.pack, fasovka: calc.fasovka, exit: calc.exit, hourPay: 0, hours: 0 });
+      }
     });
     hr.forEach(r => {
       const emp = emps.find(e => e.id === r.employee_id);
       const rate = emp ? (parseFloat(emp.base_rate)||150) : 150;
       const day = parseInt(String(r.work_date).slice(8,10));
-      dayAmt[`${r.employee_id}_${day}`] = (dayAmt[`${r.employee_id}_${day}`]||0) + (parseFloat(r.hours)||0)*rate;
+      const key = `${r.employee_id}_${day}`;
+      const hours = parseFloat(r.hours)||0;
+      addComp(key, { pack: 0, fasovka: 0, exit: 0, hourPay: hours*rate, hours });
     });
 
     const fmt = dd => `${String(dd).padStart(2,'0')}.${String(m).padStart(2,'0')}`;
-    const payDate = endDay => {
+    const payDateObj = endDay => {
       // наступний понеділок після endDay
       let dt = new Date(y, m - 1, endDay);
       dt.setDate(dt.getDate() + 1);
       while (dt.getDay() !== 1) dt.setDate(dt.getDate() + 1);
+      return dt;
+    };
+    const payDate = endDay => {
+      const dt = payDateObj(endDay);
       return `${String(dt.getDate()).padStart(2,'0')}.${String(dt.getMonth()+1).padStart(2,'0')}`;
+    };
+    const payDateIso = endDay => payDateObj(endDay).toISOString().slice(0, 10);
+
+    // всі дати виплат цього місяця — одним запитом підтягнути статус "виплачено"
+    const payDateIsos = [...new Set(weeks.map(w => payDateIso(w.endDay)))];
+    const empIds = emps.map(e => e.id);
+    let paidRows = [];
+    if (empIds.length && payDateIsos.length) {
+      paidRows = await q(
+        `SELECT employee_id, pay_date, paid FROM warehouse_payout_status
+         WHERE employee_id = ANY($1) AND pay_date = ANY($2)`,
+        [empIds, payDateIsos]);
+    }
+    const paidMap = {}; // "empId_YYYY-MM-DD" -> true
+    paidRows.forEach(r => { if (r.paid) paidMap[`${r.employee_id}_${ymd(r.pay_date)}`] = true; });
+
+    const buildBreakdownWeek = (scheme, comp) => {
+      const items = [];
+      const push = (label, amt) => { if (amt) items.push({ label, amount: Math.round(amt*100)/100 }); };
+      if (scheme === 'piece_warehouse') {
+        push('Упаковка', comp.pack);
+        push('Фасовка', comp.fasovka);
+        push('Вихід', comp.exit);
+      } else if (scheme === 'warehouse_hybrid') {
+        push('Фасовка', comp.fasovka);
+      } else if (scheme === 'hourly' || scheme === 'hourly_fixed') {
+        push(`Години × ставка (${comp.hours}г)`, comp.hourPay);
+      }
+      return items;
     };
 
     const weekRows = weeks.map(w => {
+      const pdIso = payDateIso(w.endDay);
       const perEmp = emps.map(e => {
-        let sum = 0;
-        for (let dd = w.startDay; dd <= w.endDay; dd++) sum += dayAmt[`${e.id}_${dd}`] || 0;
-        return { employee_id: e.id, name: e.name, sum };
+        const comp = { pack: 0, fasovka: 0, exit: 0, hourPay: 0, hours: 0 };
+        for (let dd = w.startDay; dd <= w.endDay; dd++) {
+          const c = dayComp[`${e.id}_${dd}`];
+          if (!c) continue;
+          comp.pack += c.pack; comp.fasovka += c.fasovka; comp.exit += c.exit;
+          comp.hourPay += c.hourPay; comp.hours += c.hours;
+        }
+        const sum = comp.pack + comp.fasovka + comp.exit + comp.hourPay;
+        return {
+          employee_id: e.id, name: e.name, sum,
+          paid: !!paidMap[`${e.id}_${pdIso}`],
+          pay_date_iso: pdIso,
+          breakdown: buildBreakdownWeek(schemeById[e.id], comp),
+        };
       });
       const weekTotal = perEmp.reduce((a, p) => a + p.sum, 0);
       return {
         period: `${fmt(w.startDay)}–${fmt(w.endDay)}`,
         pay_date: payDate(w.endDay),
+        pay_date_iso: pdIso,
         per_emp: perEmp,
         week_total: weekTotal,
       };
@@ -2252,6 +2308,27 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     }));
 
     res.json({ year: y, month: m, emps: emps.map(e => ({ id: e.id, name: e.name })), weeks: weekRows, emp_totals: empTotals });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT /api/finance/warehouse-payout-status  { employee_id, pay_date, paid }
+// Галочка «виплачено» для складу, прив'язана до конкретної дати виплати
+// (наступний понеділок після тижня), а не до calc_year/calc_month/payout_no
+// як у основного payout_status — тижні складу не мапляться 1:1 на місяці.
+app.put('/api/finance/warehouse-payout-status', requireFinance, async (req, res) => {
+  try {
+    const { employee_id, pay_date, paid } = req.body;
+    if (!employee_id || !pay_date) return res.status(400).json({ error: 'employee_id/pay_date required' });
+    const rows = await q(
+      `INSERT INTO warehouse_payout_status (employee_id, pay_date, paid, paid_at, updated_at)
+       VALUES ($1,$2,$3, CASE WHEN $3 THEN NOW() ELSE NULL END, NOW())
+       ON CONFLICT (employee_id, pay_date)
+       DO UPDATE SET paid=$3, paid_at = CASE WHEN $3 THEN COALESCE(warehouse_payout_status.paid_at, NOW()) ELSE NULL END,
+                     updated_at=NOW()
+       RETURNING *`,
+      [employee_id, pay_date, paid === true]
+    );
+    res.json({ ...rows[0], pay_date: ymd(rows[0].pay_date) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
