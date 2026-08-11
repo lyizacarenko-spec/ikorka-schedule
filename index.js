@@ -3679,6 +3679,14 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       (payByEmp[p.employee_id] = payByEmp[p.employee_id] || {})[p.payout_no] = p;
     });
 
+    // статус «видано в конверті» для корегувань
+    let corrStat = [];
+    try {
+      corrStat = await q(`SELECT * FROM correction_payout_status WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+    } catch (e) { corrStat = []; }
+    const corrByEmp = {};
+    corrStat.forEach(c => { corrByEmp[c.employee_id] = c; });
+
     // приклеїти статуси виплат + ручні суми (override має пріоритет)
     rows.forEach(r => {
       const ps = payByEmp[r.employee_id] || {};
@@ -3692,8 +3700,9 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       // фактична сума до виплати: ручна, якщо задана
       r.pay1 = r.override1 != null ? r.override1 : r.payout1;
       r.pay2 = r.override2 != null ? r.override2 : r.payout2;
+      // чи видано корегування окремо в конверті
+      r.corr_paid = !!(corrByEmp[r.employee_id] && corrByEmp[r.employee_id].paid);
     });
-
     // агрегати по відділах (лише ті, у кого порахувалось)
     const deptAgg = {};
     rows.forEach(r => {
