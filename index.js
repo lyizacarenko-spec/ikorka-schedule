@@ -2171,7 +2171,16 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       // чи видано корегування окремо в конверті
       r.corr_paid = !!(corrByEmp[r.employee_id] && corrByEmp[r.employee_id].paid);
     });
-    // агрегати по відділах (лише ті, у кого порахувалось)
+    // агрегати по відділах (лише ті, у кого порахувалось) + скільки ще «на авансі»
+    // (виплата 1 вже є, а total ще null — оборот не внесено)
+    const deptPeople = {};
+    rows.forEach(r => {
+      if (r.payout1 == null && r.total == null) return; // немає жодних даних (керівна роль тощо)
+      const p = deptPeople[r.dept_code] = deptPeople[r.dept_code] || { dept_code: r.dept_code, dept_name: r.dept_name, total_people: 0, pending: 0 };
+      p.total_people += 1;
+      if (r.total == null) p.pending += 1;
+    });
+
     const deptAgg = {};
     rows.forEach(r => {
       if (r.total == null) return;
@@ -2188,7 +2197,18 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       avg: a.count ? a.sum / a.count : 0,
       min: a.min === Infinity ? 0 : a.min,
       max: a.max === -Infinity ? 0 : a.max,
+      pending: deptPeople[a.dept_code]?.pending || 0,
     }));
+    // відділи, де ЖОДЕН total ще не порахований — інакше вони зникають зі зведення повністю
+    Object.values(deptPeople).forEach(p => {
+      if (!deptAgg[p.dept_code]) {
+        depts.push({
+          dept_code: p.dept_code, dept_name: p.dept_name,
+          count: 0, sum: 0, avg: 0, min: 0, max: 0,
+          pending: p.pending, all_pending: true,
+        });
+      }
+    });
 
     res.json({ year: y, month: m, rows, depts });
   } catch (e) { res.status(500).json({ error: e.message }); }
