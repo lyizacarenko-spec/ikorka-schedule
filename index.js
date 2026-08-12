@@ -2135,8 +2135,15 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     const { year, month, dept } = req.query;
     const y = parseInt(year || new Date().getFullYear());
     const m = parseInt(month || new Date().getMonth() + 1);
-    const rows = await computeFinanceRows(y, m, dept);
-
+    // якщо в юзера обмежений список відділів — не даємо запросити чужий dept напряму
+    if (req.user.depts && dept && !req.user.depts.includes(dept)) {
+      return res.status(403).json({ error: 'Немає доступу до цього відділу' });
+    }
+    let rows = await computeFinanceRows(y, m, dept);
+    // без обмеження в user.depts — фінанси повні; з обмеженням — тільки дозволені відділи
+    if (req.user.depts) {
+      rows = rows.filter(r => req.user.depts.includes(r.dept_code));
+    }
     // статуси виплат (галочка бухгалтера + ручні суми)
     let payStat = [];
     try {
