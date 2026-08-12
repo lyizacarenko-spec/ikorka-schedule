@@ -331,7 +331,7 @@ app.get('/api/schedule', async (req, res) => {
                FROM schedule_entries se
                JOIN employees e ON e.id = se.employee_id
                JOIN departments d ON d.id = e.department_id
-               WHERE se.entry_date BETWEEN $1 AND $2 AND e.is_active = true`;
+               WHERE se.entry_date BETWEEN $1 AND $2`;
     const params = [start, end];
     if (dept) { sql += ` AND d.code = $3`; params.push(dept); }
     sql += ' ORDER BY d.id, e.name, se.entry_date';
