@@ -247,15 +247,28 @@ app.get('/api/departments/all', async (_, res) => {
 // ── EMPLOYEES ────────────────────────────────────────────────
 app.get('/api/employees', async (req, res) => {
   try {
-    const { dept } = req.query;
+    const { dept, include_month } = req.query;
     // fired_date — останній день зі статусом '-' (звільнення)
     let sql = `SELECT e.*, d.name AS dept_name, d.code AS dept_code,
                       (SELECT MAX(se.entry_date) FROM schedule_entries se
                        WHERE se.employee_id = e.id AND se.status = '-') AS fired_date
                FROM employees e JOIN departments d ON d.id = e.department_id
-               WHERE e.is_active = true`;
+               WHERE 1=1`;
     const params = [];
-    if (dept) { sql += ` AND d.code = $1`; params.push(dept); }
+    if (include_month) {
+      const [iy, im] = include_month.split('-').map(Number);
+      const mStart = `${iy}-${String(im).padStart(2,'0')}-01`;
+      const mEnd = new Date(iy, im, 0).toISOString().slice(0,10);
+      params.push(mStart, mEnd);
+      sql += ` AND (e.is_active = true OR EXISTS (
+        SELECT 1 FROM schedule_entries se2
+        WHERE se2.employee_id = e.id AND se2.entry_date BETWEEN $${params.length-1} AND $${params.length}
+          AND se2.status IS NOT NULL AND se2.status <> ''
+      ))`;
+    } else {
+      sql += ` AND e.is_active = true`;
+    }
+    if (dept) { sql += ` AND d.code = $${params.length+1}`; params.push(dept); }
     sql += ' ORDER BY d.id, COALESCE(e.sort_order, 999999), e.name';
     res.json(await q(sql, params));
   } catch (e) { res.status(500).json({ error: e.message }); }
