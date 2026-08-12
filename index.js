@@ -1319,11 +1319,24 @@ let payOwn = 0;
 // Відсотки: офіс 2%, паста 2%, офіс2 (відмови/недзвін) 5%,
 //           акція 230 — 2.5% якщо СРЧ>=1000, інакше 2%
 // ═══════════════════════════════════════════════════════════
+// Години зміни: спершу відомий статус зі словника, інакше парсимо довільний час "HH-HH"/"HH:MM-HH:MM"
+// (щоб зміни, введені РОПом вручну через кнопку "Свій", теж рахувались)
+function hotShiftHours(status) {
+  if (STATUS_HOURS[status] != null) return STATUS_HOURS[status];
+  const m = /^(\d{1,2})(?::(\d{2}))?-(\d{1,2})(?::(\d{2}))?$/.exec(status || '');
+  if (!m) return null;
+  const sh = parseInt(m[1]), sm = m[2] ? parseInt(m[2]) : 0;
+  const eh = parseInt(m[3]), em = m[4] ? parseInt(m[4]) : 0;
+  let start = sh + sm / 60, end = eh + em / 60;
+  if (end <= start) end += 24;
+  return end - start;
+}
+
 function computeHotPeriod(entries, per, isInsta) {
   // зміни і понаднормові години з графіка
   let shifts = 0, extraHours = 0;
   (entries || []).forEach(e => {
-    const hrs = STATUS_HOURS[e.status];
+    const hrs = hotShiftHours(e.status);
     if (hrs != null && hrs > 0) {
       shifts += 1;
       if (!isInsta && hrs > HOT_BASE_HOURS) extraHours += (hrs - HOT_BASE_HOURS);
