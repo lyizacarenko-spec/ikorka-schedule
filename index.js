@@ -1785,8 +1785,8 @@ async function computeFinanceRows(y, m, dept) {
                   WHERE (e.is_active = true OR EXISTS (
                     SELECT 1 FROM schedule_entries se2
                     WHERE se2.employee_id = e.id AND se2.entry_date BETWEEN $1 AND $2
-                      AND se2.status IS NOT NULL AND se2.status <> ''
-                  ))`;
+                  AND se2.status IS NOT NULL AND se2.status NOT IN ('', '-', 'звіл.', 'звіл')
+              ))`;
     const params = [start, end];
     if (dept) { empSql += ` AND d.code = $${params.length + 1}`; params.push(dept); }
     empSql += ` ORDER BY d.id, e.name`;
