@@ -263,8 +263,8 @@ app.get('/api/employees', async (req, res) => {
       sql += ` AND (e.is_active = true OR EXISTS (
         SELECT 1 FROM schedule_entries se2
         WHERE se2.employee_id = e.id AND se2.entry_date BETWEEN $${params.length-1} AND $${params.length}
-          AND se2.status IS NOT NULL AND se2.status <> ''
-      ))`;
+            AND se2.status IS NOT NULL AND se2.status NOT IN ('', '-', 'звіл.', 'звіл')
+        ))`;
     } else {
       sql += ` AND e.is_active = true`;
     }
