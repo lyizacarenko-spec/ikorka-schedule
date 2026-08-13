@@ -1375,13 +1375,13 @@ function computeHotPeriod(entries, per, isInsta) {
 }
 
 // Дати періоду: 1 = 1-14, 2 = 15-кінець місяця
-function periodRange(y, m, no) {
-  const last = new Date(y, m, 0).getDate();
-  const mm = String(m).padStart(2, '0');
-  return no === 1
-    ? { from: `${y}-${mm}-01`, to: `${y}-${mm}-15` }
-    : { from: `${y}-${mm}-16`, to: `${y}-${mm}-${String(last).padStart(2,'0')}` };
-}
+    function periodRange(y, m, no) {
+      const last = new Date(y, m, 0).getDate();
+      const mm = String(m).padStart(2, '0');
+      return no === 1
+        ? { from: `${y}-${mm}-01`, to: `${y}-${mm}-14` }
+        : { from: `${y}-${mm}-15`, to: `${y}-${mm}-${String(last).padStart(2,'0')}` };
+    }
 
 function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate) {
   const base = parseFloat(scheme.base_rate) || 0;
