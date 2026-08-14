@@ -2198,6 +2198,28 @@ async function computeFinanceRows(y, m, dept) {
       };
     });
 
+    // авансові виплати заздалегідь — зменшують payout1 (а якщо не вистачає — і payout2),
+    // не змінюючи саму ставку/total
+    const advRows = await q(
+      `SELECT employee_id, SUM(amount) AS total FROM advance_payments
+       WHERE calc_year=$1 AND calc_month=$2 GROUP BY employee_id`, [y, m]);
+    const advByEmp = {};
+    advRows.forEach(a => { advByEmp[a.employee_id] = parseFloat(a.total) || 0; });
+
+    rows.forEach(r => {
+      const adv = advByEmp[r.employee_id] || 0;
+      r.advance_taken = adv;
+      if (adv > 0 && r.payout1 != null) {
+        r.payout1_before_advance = r.payout1;
+        const leftover = Math.max(0, adv - r.payout1);
+        r.payout1 = Math.max(0, r.payout1 - adv);
+        if (leftover > 0 && r.payout2 != null) {
+          r.payout2_before_advance = r.payout2;
+          r.payout2 = Math.max(0, r.payout2 - leftover);
+        }
+      }
+    });
+
     // деталізація по компонентах (ставка, кожен бонус, корегування) — не чіпає total/payout1/payout2
     rows.forEach(r => {
       const b = buildBreakdown(r);
