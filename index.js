@@ -2128,7 +2128,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
       if (emp.scheme_type === 'recruiter') {
         const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
         const fixScheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
-        const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date);
+        const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date, emp.id);
         const rRow = recruiterByEmp[emp.id] || {};
         const trainCandidates = parseInt(rRow.train_candidates) || 0;
         const salesCandidates = parseInt(rRow.sales_candidates) || 0;
