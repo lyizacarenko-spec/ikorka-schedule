@@ -1418,10 +1418,13 @@ function computeHotPeriod(entries, per, isInsta) {
         : { from: `${y}-${mm}-15`, to: `${y}-${mm}-${String(last).padStart(2,'0')}` };
     }
 
-function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate) {
+function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate, employeeId) {
   const base = parseFloat(scheme.base_rate) || 0;
   const normType = scheme.norm_type || 'fixed';
   const dayPrice = base / 22;                        // ціна дня завжди /22
+  // Персональний виняток: СБ (id=206) отримує всю ЗП одним платежем 1-го числа,
+  // без поділу на аванс 15-го і залишок 1-го наст.
+  const SINGLE_PAYOUT_IDS = [206];                   // ціна дня завжди /22
   // Новачок-ставочник: прийнятий у цьому місяці → платимо ЗА ВІДПРАЦЬОВАНІ ДНІ,
   // а не «оклад мінус пропуски» (інакше виходить занижена сума).
   const isNewStaff = isFirstMonthByStartDate(startDate, y, m);
