@@ -1941,8 +1941,7 @@ async function computeFinanceRows(y, m, dept) {
         // фікс-частина: computeFixedRate з базою base_rate, norm_type='fixed' (норма 22)
         const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
         const fixScheme = { base_rate: emp.base_rate, norm_days: emp.norm_days || 22, norm_type: emp.norm_type || 'fixed' };
-        const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date); // корегування додаємо нижче окремо
-        // фасовка за місяць (тільки скло/пластик)
+const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date, emp.id); // корегування додаємо нижче окремо        // фасовка за місяць (тільки скло/пластик)
         const list = whByEmp[emp.id] || [];
         let fasTotal = 0, fasDays = 0;
         list.forEach(r => { const a = fasovkaDayAmount(r); if (a > 0) { fasTotal += a; fasDays += 1; } });
