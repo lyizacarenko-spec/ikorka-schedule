@@ -902,7 +902,42 @@ app.delete('/api/salary-adjustments/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+// ═══════════════════════════════════════════════════════════
+// АВАНСИ, ВИДАНІ ЗАЗДАЛЕГІДЬ (наприклад готівкою серед місяця) —
+// автоматично зменшують Виплату 1 (а якщо не вистачає — і Виплату 2),
+// не змінюючи саму ставку/total.
+// ═══════════════════════════════════════════════════════════
+app.get('/api/advance-payments', async (req, res) => {
+  try {
+    const { employee_id, year, month } = req.query;
+    const y = parseInt(year || new Date().getFullYear());
+    const m = parseInt(month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM advance_payments WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(employee_id)); }
+    sql += ` ORDER BY created_at`;
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
+app.post('/api/advance-payments', requireFinance, async (req, res) => {
+  try {
+    const { employee_id, calc_year, calc_month, amount, payment_date, comment } = req.body;
+    const rows = await q(
+      `INSERT INTO advance_payments (employee_id, calc_year, calc_month, amount, payment_date, comment)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [employee_id, calc_year, calc_month, amount || 0, payment_date || null, comment || null]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/advance-payments/:id', requireFinance, async (req, res) => {
+  try {
+    await q(`DELETE FROM advance_payments WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 // ═══════════════════════════════════════════════════════════
 // СКЛАД — відрядники (упаковка + фасовка + вихід)
 // Тарифи упаковки: 6/7/8/9 грн; фасовка: скло 1 грн, пластик 1.5 грн
