@@ -1560,6 +1560,19 @@ app.put('/api/payout-status', requireFinance, async (req, res) => {
     const { employee_id, calc_year, calc_month, payout_no, paid, comment } = req.body;
     const overrideProvided = Object.prototype.hasOwnProperty.call(req.body, 'amount_override');
     const overrideVal = (req.body.amount_override === '' || req.body.amount_override == null) ? null : req.body.amount_override;
+
+    // якщо виплата вже позначена «виплачено» — сума заблокована від редагування,
+    // поки хтось явно не зніме галочку (paid=false) в цьому ж запиті
+    if (overrideProvided) {
+      const existing = await q(
+        `SELECT paid FROM payout_status WHERE employee_id=$1 AND calc_year=$2 AND calc_month=$3 AND payout_no=$4`,
+        [employee_id, calc_year, calc_month, payout_no]
+      );
+      if (existing.length && existing[0].paid && paid === true) {
+        return res.status(403).json({ error: 'Сума заблокована — спочатку зніміть галочку "виплачено", щоб редагувати' });
+      }
+    }
+
     const rows = await q(
       `INSERT INTO payout_status (employee_id, calc_year, calc_month, payout_no, paid, amount_override, paid_at, comment, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $5 THEN NOW() ELSE NULL END, $7, NOW())
