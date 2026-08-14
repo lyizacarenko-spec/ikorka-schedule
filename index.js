@@ -1455,7 +1455,12 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
   //   Аванс не може перевищувати підсумок (щоб виплата 2 не була від'ємною).
   let payout1 = base / 2;                      // аванс 15-го
   if (payout1 > total) payout1 = Math.max(0, total);
-  const payout2 = Math.max(0, total - payout1); // залишок 1-го наст. місяця
+  let payout2 = Math.max(0, total - payout1); // залишок 1-го наст. місяця
+
+  if (employeeId && SINGLE_PAYOUT_IDS.includes(employeeId)) {
+    payout1 = 0;
+    payout2 = total;
+  }
 
   return {
     scheme_type: 'fixed_rate',
