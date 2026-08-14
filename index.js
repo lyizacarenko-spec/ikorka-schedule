@@ -2548,7 +2548,7 @@ app.get('/api/finance/average', requireFinance, async (req, res) => {
         if (exclude_new && (emp.level === 'new')) return;
         const calc = computeFixedRate({ base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type },
                                       buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date),
-                                      salByEmp[emp.id], y, m, adjByEmp[emp.id], emp.start_date);
+                                      salByEmp[emp.id], y, m, adjByEmp[emp.id], emp.start_date, emp.id);
         const rec = perEmp[emp.id] = perEmp[emp.id] || { employee_id: emp.id, name: emp.name, dept_name: emp.dept_name, months: {}, sum: 0, n: 0 };
         rec.months[`${y}-${String(m).padStart(2,'0')}`] = calc.total;
         rec.sum += calc.total; rec.n += 1;
