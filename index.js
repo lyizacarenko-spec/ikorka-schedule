@@ -1356,15 +1356,27 @@ let payOwn = 0;
 // ═══════════════════════════════════════════════════════════
 // Години зміни: спершу відомий статус зі словника, інакше парсимо довільний час "HH-HH"/"HH:MM-HH:MM"
 // (щоб зміни, введені РОПом вручну через кнопку "Свій", теж рахувались)
+// статуси, які НЕ вважаються фактично відпрацьованим днем, навіть якщо введені
+// довільним текстом через "Свій графік" (лікарняний, відпустка, вихідний, звільнення, навчання)
+const HOT_EXCLUDE_RE = /вих|больн|хвор|заболел|лікарн|відпуст|відпуск|отпуск|звіл|навч/i;
+
 function hotShiftHours(status) {
   if (STATUS_HOURS[status] != null) return STATUS_HOURS[status];
-  const m = /^(\d{1,2})(?::(\d{2}))?-(\d{1,2})(?::(\d{2}))?$/.exec(status || '');
-  if (!m) return null;
-  const sh = parseInt(m[1]), sm = m[2] ? parseInt(m[2]) : 0;
-  const eh = parseInt(m[3]), em = m[4] ? parseInt(m[4]) : 0;
-  let start = sh + sm / 60, end = eh + em / 60;
-  if (end <= start) end += 24;
-  return end - start;
+  const s = (status || '').trim();
+  if (!s) return null;
+  // явний час будь-де в рядку (щоб ловити "удаленка 8-17", "удаленка 9:00-18:00" тощо)
+  const m = /(\d{1,2})(?::(\d{2}))?\s*-\s*(\d{1,2})(?::(\d{2}))?/.exec(s);
+  if (m) {
+    const sh = parseInt(m[1]), sm = m[2] ? parseInt(m[2]) : 0;
+    const eh = parseInt(m[3]), em = m[4] ? parseInt(m[4]) : 0;
+    let start = sh + sm / 60, end = eh + em / 60;
+    if (end <= start) end += 24;
+    return end - start;
+  }
+  // часу немає: якщо це лікарняний/відпустка/вихідний/звільнення/навчання — не робочий день
+  if (HOT_EXCLUDE_RE.test(s)) return null;
+  // будь-який інший довільний текст через "Свій графік" — рахуємо як повний робочий день (8 год)
+  return 8;
 }
 
 function computeHotPeriod(entries, per, isInsta) {
