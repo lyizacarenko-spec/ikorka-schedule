@@ -1173,7 +1173,11 @@ function computeSalesSalary(salRow, isOrder, opts) {
   //   дні_навчання×100 + відпрацьовані_дні × (8000/22)
   const newAdvance = () => Math.round(trainDays * TRAIN_DAY_PAY + workedGraph * NEW_DAY_BASE / 22);
 
-  const fact = salRow ? (parseFloat(salRow.fact_amount) || 0) : 0;
+  const manualFact = salRow ? (parseFloat(salRow.fact_amount) || 0) : 0;
+  // Для новачків (перший місяць): якщо РОП ще не вписав "Факт обороту" вручну,
+  // беремо суму зі щоденно внесеної виручки (як автозіл для днів). Для решти
+  // співробітників поведінка НЕ змінюється — оборот і надалі лише вручну.
+  const fact = manualFact > 0 ? manualFact : (isFirst ? (parseFloat(o.revenueFromDetail) || 0) : 0);
   const plan = salRow ? (parseFloat(salRow.plan_amount) || 0) : 0;
   const ret  = salRow ? (parseFloat(salRow.returns_pct) || 0) : 0;
   // "Кількість роб. днів" — вручну вводить РОП разом з оборотом. Якщо ще не
@@ -1950,6 +1954,18 @@ async function computeFinanceRows(y, m, dept) {
     const perByEmp = {};
     perRows.forEach(p => { (perByEmp[p.employee_id] = perByEmp[p.employee_id] || {})[p.period_no] = p; });
 
+    // денна виручка (daily_revenue_detail) — сума за місяць по співробітнику.
+    // Використовується ЛИШЕ як автозаповнення "Факт обороту" для новачків
+    // (перший місяць), якщо РОП ще не вписав суму вручну в картці ЗП.
+    let revRows = [];
+    try {
+      revRows = await q(
+        `SELECT employee_id, SUM(amount) AS total FROM daily_revenue_detail
+         WHERE revenue_date BETWEEN $1 AND $2 GROUP BY employee_id`, [start, end]);
+    } catch (e) { revRows = []; }
+    const revByEmp = {};
+    revRows.forEach(r => { revByEmp[r.employee_id] = parseFloat(r.total) || 0; });
+
     // статуси виплат (галочка бухгалтера + ручні суми)
     let payStat = [];
     try {
@@ -2112,7 +2128,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         //  • оборот=0 → лише аванс (виплата 1), total/payout2 = null (стадія авансу 31 числа)
         //  • оборот введено → повний розрахунок з розбивкою на 2 виплати
         const sc = computeSalesSalary(salByEmp[emp.id], isOrder,
-          { workedFromGraph: workedGraph, trainDays, isFirstMonth: isFirst });
+          { workedFromGraph: workedGraph, trainDays, isFirstMonth: isFirst, revenueFromDetail: revByEmp[emp.id] || 0 });
         return {
           employee_id: emp.id, name: emp.name,
           dept_code: emp.dept_code, dept_name: emp.dept_name,
