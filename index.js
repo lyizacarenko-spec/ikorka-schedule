@@ -1126,7 +1126,7 @@ async function isFirstWorkingMonth(employeeId, y, m) {
 // Прийнятий раніше або дата не задана -> старий (фікс аванс 7000/5000).
 function isFirstMonthByStartDate(startDate, y, m) {
   if (!startDate) return false;
-  const s = String(startDate).slice(0, 10);
+  const s = startDate.toISOString ? startDate.toISOString().slice(0, 10) : String(startDate).slice(0, 10);
   const sy = parseInt(s.slice(0, 4));
   const sm = parseInt(s.slice(5, 7));
   return sy === y && sm === m;
@@ -1364,7 +1364,8 @@ function hotShiftHours(status) {
   if (STATUS_HOURS[status] != null) return STATUS_HOURS[status];
   const s = (status || '').trim();
   if (!s) return null;
-  // явний час будь-де в рядку (щоб ловити "удаленка 8-17", "удаленка 9:00-18:00" тощо)
+  // явний час будь-де в рядку (щоб ловити "удаленка 8-17", "удаленка 9:00-18:00" тощо —
+  // час, введений РОПом вручну через кнопку "Свій графік" разом із текстовою приміткою)
   const m = /(\d{1,2})(?::(\d{2}))?\s*-\s*(\d{1,2})(?::(\d{2}))?/.exec(s);
   if (m) {
     const sh = parseInt(m[1]), sm = m[2] ? parseInt(m[2]) : 0;
@@ -1373,9 +1374,9 @@ function hotShiftHours(status) {
     if (end <= start) end += 24;
     return end - start;
   }
-  // часу немає: якщо це лікарняний/відпустка/вихідний/звільнення/навчання — не робочий день
+  // часу в тексті немає: якщо це лікарняний/відпустка/вихідний/звільнення/навчання — не робочий день
   if (HOT_EXCLUDE_RE.test(s)) return null;
-  // будь-який інший довільний текст через "Свій графік" — рахуємо як повний робочий день (8 год)
+  // будь-який інший довільний текст, поставлений через "Свій графік" — рахуємо як повний робочий день
   return 8;
 }
 
@@ -2252,6 +2253,85 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
     return rows;
 }
 
+// ═══════════════════════════════════════════════════════════
+// ХОЛОДКА — менеджери гарячого відділу вносять замовлення на "холодну" базу
+// (відділ rzpk), окремо від своєї гарячої ЗП. Комісія: % від суми холодки,
+// ОДНА сума за весь місяць (без розбивки на періоди). Мажара — 5%,
+// решта менеджерів гарячого відділу — 0.2% (дефолт, редагується вручну).
+// Показується ЯК ОКРЕМИЙ рядок у фінансах відділу rzpk (пр. "Ім'я (холодка)"),
+// щоб не змішувати з гарячою ЗП і з ЗП штатних rzpk-менеджерів.
+// ═══════════════════════════════════════════════════════════
+async function computeHotColdRows(y, m) {
+  const hotMgrs = await q(
+    `SELECT e.id, e.name FROM employees e
+     JOIN departments d ON d.id = e.department_id
+     WHERE d.code = 'hot' AND e.is_active = true
+       AND e.role NOT IN ('rop','head','teamlead')
+     ORDER BY e.name`
+  );
+  if (!hotMgrs.length) return [];
+
+  let incomeRows = [];
+  try {
+    incomeRows = await q(
+      `SELECT * FROM hot_cold_income WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+  } catch (e) { incomeRows = []; }
+  const byEmp = {};
+  incomeRows.forEach(r => { byEmp[r.employee_id] = r; });
+
+  const rzpkDept = await q(`SELECT name FROM departments WHERE code='rzpk' LIMIT 1`);
+  const deptName = rzpkDept[0]?.name || 'РЗПК';
+
+  return hotMgrs.map(emp => {
+    const inc = byEmp[emp.id];
+    const coldSum = inc ? parseFloat(inc.cold_sum) || 0 : 0;
+    const pct = inc ? parseFloat(inc.pct) || 0 : 0.2;
+    const amount = Math.round(coldSum * pct) / 100;
+    return {
+      employee_id: emp.id,
+      name: `${emp.name} (холодка)`,
+      dept_code: 'rzpk',
+      dept_name: deptName,
+      scheme_type: 'hot_cold',
+      pay_schedule: 'sales',
+      cold_sum: coldSum,
+      cold_pct: pct,
+      payout1: null,
+      payout2: inc ? amount : null,
+      total: inc ? amount : null,
+      note: inc ? null : 'холодка не внесена',
+    };
+  });
+}
+
+app.get('/api/hot-cold-income', async (req, res) => {
+  try {
+    const { employee_id, year, month } = req.query;
+    const y = parseInt(year || new Date().getFullYear());
+    const m = parseInt(month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM hot_cold_income WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(employee_id)); }
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/hot-cold-income', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const { employee_id, calc_year, calc_month, cold_sum, pct } = req.body;
+    const rows = await q(
+      `INSERT INTO hot_cold_income (employee_id, calc_year, calc_month, cold_sum, pct, updated_at)
+       VALUES ($1,$2,$3,$4,$5,NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month)
+       DO UPDATE SET cold_sum=$4, pct=$5, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, cold_sum || 0, pct != null ? pct : 0.2]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/finance', requireFinance, async (req, res) => {
   try {
     const { year, month, dept } = req.query;
@@ -2262,6 +2342,16 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       return res.status(403).json({ error: 'Немає доступу до цього відділу' });
     }
     let rows = await computeFinanceRows(y, m, dept);
+    // "холодка" — гарячі менеджери вносять замовлення на rzpk, рахуємо окремо
+    if (!dept || dept === 'rzpk') {
+      const coldRows = await computeHotColdRows(y, m);
+      coldRows.forEach(r => {
+        const b = buildBreakdown(r);
+        r.breakdown = b.all;
+        r.breakdown_components = b.components;
+      });
+      rows = rows.concat(coldRows);
+    }
     // без обмеження в user.depts — фінанси повні; з обмеженням — тільки дозволені відділи
     if (req.user.depts) {
       rows = rows.filter(r => req.user.depts.includes(r.dept_code));
@@ -2297,6 +2387,15 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       // фактична сума до виплати: ручна, якщо задана
       r.pay1 = r.override1 != null ? r.override1 : r.payout1;
       r.pay2 = r.override2 != null ? r.override2 : r.payout2;
+      // якщо перша виплата вже має ручну суму (заплатили більше/менше дефолтного
+      // авансу), а другу ще НЕ переозначили вручну — перерахувати залишок від
+      // фактично виданої суми, а не від дефолтного авансу (інакше 15-те/1-ше
+      // наступного числа буде завищене чи занижене на різницю).
+      // Не чіпаємо 'hot' — там два періоди незалежні, а не аванс+залишок.
+      if (r.override1 != null && r.override2 == null && r.total != null && r.pay_schedule !== 'hot') {
+        r.payout2 = Math.max(0, r.total - r.override1);
+        r.pay2 = r.payout2;
+      }
       // чи видано корегування окремо в конверті
       r.corr_paid = !!(corrByEmp[r.employee_id] && corrByEmp[r.employee_id].paid);
     });
