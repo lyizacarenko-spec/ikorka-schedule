@@ -1582,6 +1582,9 @@ function buildBreakdown(r) {
       push('Кандидати у продажі', r.sales_bonus);
       push('Адмін-доплата', r.admin_bonus);
       break;
+    case 'hot_cold':
+      push(`Холодка ${r.cold_pct}% від ${r.cold_sum}`, r.total);
+      break;
     default:
       break;
   }
