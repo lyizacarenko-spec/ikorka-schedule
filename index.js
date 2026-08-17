@@ -1176,7 +1176,11 @@ function computeSalesSalary(salRow, isOrder, opts) {
   const fact = salRow ? (parseFloat(salRow.fact_amount) || 0) : 0;
   const plan = salRow ? (parseFloat(salRow.plan_amount) || 0) : 0;
   const ret  = salRow ? (parseFloat(salRow.returns_pct) || 0) : 0;
-  const days = salRow ? (parseInt(salRow.worked_days) || 0) : 0;
+  // "Кількість роб. днів" — вручну вводить РОП разом з оборотом. Якщо ще не
+  // ввів (0/не задано) — беремо реальну кількість відпрацьованих змін з графіка,
+  // щоб days не показувало 0 для щойно прийнятих (і не спотворювало шкалу ставки).
+  const manualDays = salRow ? (parseInt(salRow.worked_days) || 0) : 0;
+  const days = manualDays > 0 ? manualDays : workedGraph;
   const seniorBonus = salRow ? (parseFloat(salRow.senior_bonus) || 0) : 0;
   const penalty = salRow ? (parseFloat(salRow.penalty) || 0) : 0;
 
