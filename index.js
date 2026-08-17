@@ -1240,7 +1240,12 @@ function computeSalesSalary(salRow, isOrder, opts) {
              advance:payout1, remainder:payout2 };
   } else {
     pct = plan > 0 ? Math.round(cleanBase / plan * 100) : 0;
-    if (days < 15 && pct < 80) { rate = 8000; bonusPct = 4; }
+    if (isFirst) {
+      // новачок (перший місяць): немає реального плану — 5% від особистого
+      // обороту завжди, а ставка 15000 ділиться пропорційно відпрацьованим
+      // дням (з 22), а не видається повною незалежно від кількості днів
+      rate = Math.round(15000 * days / 22); bonusPct = 5;
+    } else if (days < 15 && pct < 80) { rate = 8000; bonusPct = 4; }
     else if (pct < 70) { rate = 13000; bonusPct = 4; }
     else if (pct < 80) { rate = 13000; bonusPct = 4.5; }
     else if (pct < 100) { rate = 15000; bonusPct = 5; }
