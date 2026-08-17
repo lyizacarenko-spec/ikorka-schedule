@@ -1132,6 +1132,18 @@ function isFirstMonthByStartDate(startDate, y, m) {
   return sy === y && sm === m;
 }
 
+// Другий місяць роботи (наступний календарний після місяця прийому):
+// теж ставка 15000 (пропорційно дням), але бонус 4% замість 5%.
+function isSecondMonthByStartDate(startDate, y, m) {
+  if (!startDate) return false;
+  const s = startDate.toISOString ? startDate.toISOString().slice(0, 10) : String(startDate).slice(0, 10);
+  const sy = parseInt(s.slice(0, 4));
+  const sm = parseInt(s.slice(5, 7));
+  let ny = sy, nm = sm + 1;
+  if (nm > 12) { nm = 1; ny++; }
+  return ny === y && nm === m;
+}
+
 // кількість будніх днів (пн-пт) у місяці
 function monthWeekdays(year, month) {
   const n = new Date(year, month, 0).getDate();
@@ -1168,16 +1180,16 @@ function computeSalesSalary(salRow, isOrder, opts) {
   const trainPay    = trainDays * TRAIN_DAY_PAY;
   const workedGraph = o.workedFromGraph != null ? parseInt(o.workedFromGraph) : 0;
   const isFirst     = !!o.isFirstMonth;
+  const isSecondMonth = !!o.isSecondMonth;
 
   // Аванс новачка (однаковий для продажів і відмов):
   //   дні_навчання×100 + відпрацьовані_дні × (8000/22)
   const newAdvance = () => Math.round(trainDays * TRAIN_DAY_PAY + workedGraph * NEW_DAY_BASE / 22);
 
   const manualFact = salRow ? (parseFloat(salRow.fact_amount) || 0) : 0;
-  // Для новачків (перший місяць): якщо РОП ще не вписав "Факт обороту" вручну,
-  // беремо суму зі щоденно внесеної виручки (як автозіл для днів). Для решти
-  // співробітників поведінка НЕ змінюється — оборот і надалі лише вручну.
-  const fact = manualFact > 0 ? manualFact : (isFirst ? (parseFloat(o.revenueFromDetail) || 0) : 0);
+  // Для новачків (1-й і 2-й місяць): якщо РОП ще не вписав "Факт обороту"
+  // вручну, беремо суму зі щоденно внесеної виручки. Для решти — без змін.
+  const fact = manualFact > 0 ? manualFact : ((isFirst || isSecondMonth) ? (parseFloat(o.revenueFromDetail) || 0) : 0);
   const plan = salRow ? (parseFloat(salRow.plan_amount) || 0) : 0;
   const ret  = salRow ? (parseFloat(salRow.returns_pct) || 0) : 0;
   // "Кількість роб. днів" — вручну вводить РОП разом з оборотом. Якщо ще не
@@ -1245,10 +1257,12 @@ function computeSalesSalary(salRow, isOrder, opts) {
   } else {
     pct = plan > 0 ? Math.round(cleanBase / plan * 100) : 0;
     if (isFirst) {
-      // новачок (перший місяць): немає реального плану — 5% від особистого
-      // обороту завжди, а ставка 15000 ділиться пропорційно відпрацьованим
-      // дням (з 22), а не видається повною незалежно від кількості днів
+      // 1-й місяць (новачок): немає реального плану — 5% від особистого
+      // обороту, ставка 15000 ділиться пропорційно відпрацьованим дням.
       rate = Math.round(15000 * days / 22); bonusPct = 5;
+    } else if (isSecondMonth) {
+      // 2-й місяць: та сама ставка (пропорційно дням), але вже 4% від обороту
+      rate = Math.round(15000 * days / 22); bonusPct = 4;
     } else if (days < 15 && pct < 80) { rate = 8000; bonusPct = 4; }
     else if (pct < 70) { rate = 13000; bonusPct = 4; }
     else if (pct < 80) { rate = 13000; bonusPct = 4.5; }
@@ -2119,17 +2133,22 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
           };
         }
         const isOrder = ORDER_DEPTS.includes(emp.dept_code);
-        // дані з графіка місяця: відпрацьовані зміни + дні навчання + чи перший місяць
-        const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
-        const { worked: workedGraph, train: trainDays } = countWorkAndTrain(monthEntries);
+        // РЕАЛЬНІ відпрацьовані зміни/навчання — рахуємо ЛИШЕ по факту збережених
+        // записів графіка (schedByEmp), а НЕ по buildMonthEntries: та функція
+        // автозаповнює порожні/майбутні дні місяця дефолтним робочим статусом
+        // (для розрахунку ставочників на кінець місяця), і якщо календар не
+        // заповнили наперед кнопкою "Заповнити місяць" — незаповнені майбутні
+        // дні хибно рахувались би як відпрацьовані.
+        const { worked: workedGraph, train: trainDays } = countWorkAndTrain(schedByEmp[emp.id] || []);
         // Новачок: дата прийому в цьому місяці АБО (дата не задана + є навчання + не працював раніше)
         const isFirst = isFirstMonthByStartDate(emp.start_date, y, m)
           || (!emp.start_date && trainDays > 0 && !hadPrior.has(emp.id));
+        const isSecondMonth = !isFirst && isSecondMonthByStartDate(emp.start_date, y, m);
         // computeSalesSalary тепер завжди повертає результат:
         //  • оборот=0 → лише аванс (виплата 1), total/payout2 = null (стадія авансу 31 числа)
         //  • оборот введено → повний розрахунок з розбивкою на 2 виплати
         const sc = computeSalesSalary(salByEmp[emp.id], isOrder,
-          { workedFromGraph: workedGraph, trainDays, isFirstMonth: isFirst, revenueFromDetail: revByEmp[emp.id] || 0 });
+          { workedFromGraph: workedGraph, trainDays, isFirstMonth: isFirst, isSecondMonth, revenueFromDetail: revByEmp[emp.id] || 0 });
         return {
           employee_id: emp.id, name: emp.name,
           dept_code: emp.dept_code, dept_name: emp.dept_name,
