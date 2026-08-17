@@ -1867,7 +1867,8 @@ async function computeFinanceRows(y, m, dept) {
                   FROM employees e
                   JOIN departments d ON d.id = e.department_id
                   LEFT JOIN salary_schemes s ON s.employee_id = e.id
-                  WHERE (e.is_active = true OR EXISTS (
+                  WHERE (e.start_date IS NULL OR e.start_date <= $2)
+                    AND (e.is_active = true OR EXISTS (
                     SELECT 1 FROM schedule_entries se2
                     WHERE se2.employee_id = e.id AND se2.entry_date BETWEEN $1 AND $2
                   AND se2.status IS NOT NULL AND se2.status NOT IN ('', '-', 'звіл.', 'звіл')
