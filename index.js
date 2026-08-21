@@ -4,7 +4,7 @@ const cors    = require('cors');
 const { Pool } = require('pg');
 const { google } = require('googleapis');
 
-const SHEET_ID = '1hpf2y3T2VR6CVWXAMOpc6m6smQDShIangZwF6tsohRM';
+const SHEET_ID = '132hHyGfehSWe6mkpmKBUhUBsJtPGLPjPZH84d1HuvXI';
 const SERVICE_ACCOUNT = {
   type: 'service_account',
   project_id: 'ikorka-schedule',
@@ -610,230 +610,162 @@ app.put('/api/salary', requireAuth, async (req, res) => {
 });
 
 // ── GOOGLE SHEETS EXPORT ─────────────────────────────
+// Категоризація рядка деталізації ЗП (дзеркало клієнтської fundBreakdown/categorizeSalaryLabel
+// з index.html) — для рядка "Ставка / % / Доплати / Штрафи" у шапці кожної вкладки експорту.
+function categorizeSalaryLabel(label, amount) {
+  if (/%/.test(label)) return 'pct';
+  if (/Оклад|Ставка|Фікс|Переробка|Недопрацьовано|Упаковка|Фасовка|Вихід|Години × ставка/.test(label)) return 'rate';
+  return amount < 0 ? 'penalty' : 'bonus';
+}
+function fundBreakdown(rows) {
+  let rate = 0, pct = 0, bonus = 0, penalty = 0;
+  (rows || []).forEach(r => {
+    (r.breakdown || []).forEach(item => {
+      const cat = categorizeSalaryLabel(item.label, item.amount);
+      if (cat === 'rate') rate += item.amount;
+      else if (cat === 'pct') pct += item.amount;
+      else if (cat === 'penalty') penalty += item.amount;
+      else bonus += item.amount;
+    });
+  });
+  return { rate, pct, bonus, penalty };
+}
+
 app.post('/api/export/salary', async (req, res) => {
   try {
     const { year, month, dept, sheet_name } = req.body;
     const y = parseInt(year || new Date().getFullYear());
     const m = parseInt(month || new Date().getMonth() + 1);
+    const MONTHS = ['','Січень','Лютий','Березень','Квітень','Травень','Червень','Липень','Серпень','Вересень','Жовтень','Листопад','Грудень'];
+    const LEVEL = {top:'ТОП',mid:'Мідл',jun:'Джун',new:'Новий'};
+    const SCHEME_LABEL = {
+      fixed_rate: 'Ставочник', mentor: 'Наставник', recruiter: 'Рекрутер',
+      hourly: 'Вантажник (год.)', hourly_fixed: 'Вантажник (фікс+год.)',
+      piece_warehouse: 'Склад-відрядник', warehouse_hybrid: 'Начальник складу',
+      hot: 'Гарячі продажі', rop: 'РОП', percent_plan: 'Продажі (% плану)',
+      orders_count: 'Відмови (к-сть замовлень)', hot_cold: 'Холодка (гарячі)',
+    };
 
-    let sql = `
-      SELECT e.id AS employee_id, e.name, e.level, e.role, d.code AS dept_code, d.name AS dept_name,
-             sc.plan_amount, sc.fact_amount, sc.returns_pct, sc.worked_days,
-             sc.senior_bonus, sc.penalty, sc.note,
-             sc.updated_at
-      FROM salary_calc sc
-      JOIN employees e ON e.id = sc.employee_id
-      JOIN departments d ON d.id = e.department_id
-      WHERE sc.calc_year=$1 AND sc.calc_month=$2 AND e.is_active=true`;
-    const params = [y, m];
-    if(dept){ sql += ' AND d.code=$3'; params.push(dept); }
-    sql += ' ORDER BY d.id, e.name';
+    // всі рядки одним викликом — та сама логіка, що й на сторінці «Фінанси»,
+    // тож суми завжди збігаються з дашбордом
+    let financeRows = await computeFinanceRows(y, m, dept);
+    if (!dept || dept === 'rzpk') {
+      const coldRows = await computeHotColdRows(y, m);
+      coldRows.forEach(r => { const b = buildBreakdown(r); r.breakdown = b.all; r.breakdown_components = b.components; });
+      financeRows = financeRows.concat(coldRows);
+    }
+    const rows = financeRows.filter(r => r.total != null);
 
-    const salaries = await q(sql, params);
-
-    // корегування ЗП за місяць (для інформаційної колонки — у формулу РАЗОМ нижче
-    // свідомо НЕ додаємо, щоб не змінити вже перевірений підсумок продажного розрахунку)
-    const adjRows = await q(
-      `SELECT * FROM salary_adjustments WHERE calc_year=$1 AND calc_month=$2 ORDER BY created_at`, [y, m]);
-    const adjByEmpId = {};
-    adjRows.forEach(a => { (adjByEmpId[a.employee_id] = adjByEmpId[a.employee_id] || []).push(a); });
-
-    // рядки для решти відділів (усі схеми, крім percent_plan/orders_count —
-    // ті вже покриті вкладкою продажів вище) — та сама логіка, що й на сторінці
-    // «Фінанси» (computeFinanceRows), тож суми завжди збігаються.
-    // РОП сюди теж потрапляє — раніше він взагалі не траплявся в експорт ЗП
-    // (не мав рядка в salary_calc). Гарячі продажі (hot) винесені в окрему
-    // вкладку нижче — у них 14 компонентів (7 на період × 2 періоди),
-    // в узагальнені 4 слоти цієї вкладки вони б не влізли.
-    const financeRows = await computeFinanceRows(y, m, dept);
-    const otherRows = financeRows.filter(r => r.total != null
-      && !['percent_plan', 'orders_count', 'hot'].includes(r.scheme_type));
-    const hotRows = financeRows.filter(r => r.total != null && r.scheme_type === 'hot');
-
-    if (!salaries.length && !otherRows.length && !hotRows.length) {
+    if (!rows.length) {
       return res.json({ ok:false, message:'Немає даних ЗП за цей місяць' });
     }
 
+    // групуємо по відділу — кожен відділ отримає власну вкладку
+    const byDept = {};
+    rows.forEach(r => { (byDept[r.dept_code] = byDept[r.dept_code] || { name: r.dept_name, rows: [] }).rows.push(r); });
+
     const sheets = await getSheetsClient();
-    const tabName = sheet_name || `ЗП ${m}.${y}`;
+    const prefix = sheet_name || `ЗП ${m}.${y}`;
+    const tabsWritten = [];
 
-    try {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
-        resource: { requests: [{ addSheet: { properties: { title: tabName } } }] }
-      });
-    } catch(e) {
-      // Sheet already exists - ok
-    }
+    for (const deptCode of Object.keys(byDept)) {
+      const { name: deptName, rows: deptRows } = byDept[deptCode];
+      const tabName = `${prefix} — ${deptName}`.slice(0, 99); // ліміт Google Sheets на назву вкладки
 
-    const MONTHS = ['','Січень','Лютий','Березень','Квітень','Травень','Червень','Липень','Серпень','Вересень','Жовтень','Листопад','Грудень'];
-    const header = [
-      [`ЗП ${MONTHS[m]} ${y} — продажі/відмови`,'','','','','','','','','','','','','',''],
-      ['ІМЯ','Відділ','Рівень','Кол роб.днів','План','Оборот','% повернень','Ставка','Бонус %','% бонус грн','Переробка','Доплата','Штраф','Корегування','Примітка','РАЗОМ']
-    ];
+      try {
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: SHEET_ID,
+          resource: { requests: [{ addSheet: { properties: { title: tabName } } }] }
+        });
+      } catch (e) { /* вкладка вже є — ок, перезапишемо вміст */ }
 
-    const NORM_DAYS = 22;
-    const LEVEL = {top:'ТОП',mid:'Мідл',jun:'Джун',new:'Новий'};
-    const dataRows = salaries.map(s => {
-      const isOrderDept = ORDER_DEPTS.includes(s.dept_code);
-      const ret = parseFloat(s.returns_pct)||0;
-      const retExcess = Math.max(0, ret-6);
-      const retCorr = (s.fact_amount||0)*retExcess/100;
-      const cleanBase = (s.fact_amount||0)-retCorr;
-      const plan = s.plan_amount||0;
-      const pct = plan>0 ? Math.round(cleanBase/plan*100) : 0;
-      const days = s.worked_days||0;
+      const fb = fundBreakdown(deptRows);
+      const fundLine = [`Ставка: ${Math.round(fb.rate)}`, `%: ${Math.round(fb.pct)}`,
+        `Доплати: ${Math.round(fb.bonus)}`, `Штрафи: ${fb.penalty ? '-' + Math.round(Math.abs(fb.penalty)) : 0}`,
+        `Фонд відділу: ${Math.round(deptRows.reduce((s,r)=>s+(r.total||0),0))}`];
 
-      let rate=0, bonusPct=0;
-      if(isOrderDept){
-        const orders=plan;
-        if(orders>=150){rate=11000;bonusPct=9;}
-        else if(orders>=115){rate=10000;bonusPct=8;}
-        else if(orders>=90){rate=9000;bonusPct=7;}
-        else{rate=0;bonusPct=5;}
-        const fullRate=days>=22&&orders>=90;
-        rate=fullRate?rate:Math.round(rate*days/NORM_DAYS);
+      let values;
+      if (deptCode === 'hot') {
+        // гарячі — фіксовані 14 колонок компонентів (7 на період × 2 періоди)
+        const header = [
+          [`ЗП ${MONTHS[m]} ${y} — ${deptName}`],
+          fundLine,
+          ['ІМЯ','Рівень',
+           'П1: Ставка','П1: ОФІС1345 %','П1: Паста %','П1: ОФІС2 %','П1: Акція230 %','П1: Доплата','П1: Штраф',
+           'П2: Ставка','П2: ОФІС1345 %','П2: Паста %','П2: ОФІС2 %','П2: Акція230 %','П2: Доплата','П2: Штраф',
+           'Корегування','Виплата1','Виплата2','РАЗОМ'],
+        ];
+        const data = deptRows.map(r => {
+          const p1 = r.period1 || {}, p2 = r.period2 || {};
+          return [
+            r.name, LEVEL[r.level] || r.level,
+            p1.rate||0, p1.pay_office||0, p1.pay_pasta||0, p1.pay_office2||0, p1.pay_action||0, p1.bonus||0, p1.penalty||0,
+            p2.rate||0, p2.pay_office||0, p2.pay_pasta||0, p2.pay_office2||0, p2.pay_action||0, p2.bonus||0, p2.penalty||0,
+            r.adj_total || '', r.payout1 ?? '', r.payout2 ?? '', r.total,
+          ];
+        });
+        values = [...header, ...data];
       } else {
-        if(days<15&&pct<80){rate=8000;bonusPct=4;}
-        else if(pct<70){rate=13000;bonusPct=4;}
-        else if(pct<80){rate=13000;bonusPct=4.5;}
-        else if(pct<100){rate=15000;bonusPct=5;}
-        else if(pct<110){rate=15000;bonusPct=6;}
-        else{rate=15000;bonusPct=7;}
+        // Продажі/відмови (percent_plan/orders_count) — окремий блок з "рідними"
+        // бізнес-колонками (План/Оборот/% повернень/Ставка/Бонус%…), як і раніше.
+        // Все, що НЕ percent_plan/orders_count (РОП, холодка, ставочники, склад,
+        // наставник, рекрутер) — другий блок нижче, універсальним форматом
+        // (компонент/сума з деталізації), бо там немає єдиної спільної формули.
+        const salesRows = deptRows.filter(r => r.scheme_type === 'percent_plan' || r.scheme_type === 'orders_count');
+        const otherSchemeRows = deptRows.filter(r => r.scheme_type !== 'percent_plan' && r.scheme_type !== 'orders_count');
+
+        values = [[`ЗП ${MONTHS[m]} ${y} — ${deptName}`], fundLine];
+
+        if (salesRows.length) {
+          values.push(['ІМЯ','Рівень','Кол роб.днів','План','Оборот','% повернень','Ставка','Бонус %','% бонус грн','Переробка','Навчання','Доплата','Штраф','Корегування','Виплата1','Виплата2','РАЗОМ']);
+          salesRows.forEach(r => {
+            values.push([
+              r.name, LEVEL[r.level] || r.level, r.worked_days ?? '',
+              r.plan ?? '', r.fact ?? '', (r.returns_pct ?? 0) + '%',
+              r.rate ?? 0, (r.bonus_pct ?? 0) + '%', r.bonus ?? 0,
+              r.overtime || '', r.train_pay || '', r.senior_bonus || '', r.penalty || '',
+              r.adj_total || '',
+              r.payout1 != null ? r.payout1 : (r.advance != null ? r.advance : ''),
+              r.payout2 != null ? r.payout2 : (r.remainder != null ? r.remainder : ''),
+              r.total,
+            ]);
+          });
+        }
+
+        if (otherSchemeRows.length) {
+          if (salesRows.length) values.push([]); // порожній рядок-розділювач між блоками
+          values.push(['ІМЯ','Рівень','Схема',
+            'Компонент 1','Сума 1','Компонент 2','Сума 2','Компонент 3','Сума 3','Компонент 4','Сума 4',
+            'Корегування','Виплата1','Виплата2','РАЗОМ']);
+          otherSchemeRows.forEach(r => {
+            const items = r.breakdown_components || [];
+            const slots = [0,1,2,3].map(i => items[i] || null);
+            values.push([
+              r.name, LEVEL[r.level] || r.level, SCHEME_LABEL[r.scheme_type] || r.scheme_type || '',
+              ...slots.flatMap(it => [it ? it.label : '', it ? it.amount : '']),
+              r.adj_total || '',
+              r.payout1 != null ? r.payout1 : (r.advance != null ? r.advance : ''),
+              r.payout2 != null ? r.payout2 : (r.remainder != null ? r.remainder : ''),
+              r.total,
+            ]);
+          });
+        }
       }
-      const bonus = Math.round(cleanBase*bonusPct/100);
-      const overtime = Math.max(0,days-NORM_DAYS)*(isOrderDept?450:400);
-      const senior = parseFloat(s.senior_bonus)||0;
-      const penalty = parseFloat(s.penalty)||0;
-      const total = rate+bonus+overtime+senior-penalty;   // формула НЕ змінена
-      const adjList = adjByEmpId[s.employee_id] || [];
-      const adjTotal = adjList.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
 
-      return [
-        s.name,
-        s.dept_name,
-        LEVEL[s.level]||s.level,
-        days,
-        plan,
-        s.fact_amount||0,
-        ret+'%',
-        rate,
-        bonusPct+'%',
-        bonus,
-        overtime||'',
-        senior||'',
-        penalty||'',
-        adjTotal||'',
-        s.note||'',
-        total
-      ];
-    });
-
-    const values = [...header, ...dataRows];
-
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${tabName}!A1`,
-      valueInputOption: 'USER_ENTERED',
-      resource: { values }
-    });
-
-    // ── друга вкладка: решта відділів (ставочники, наставник, рекрутер,
-    //    склад, гарячі продажі, РОП…) — з деталізацією по компонентах ──
-    let otherTab = null, otherCount = 0;
-    if (otherRows.length) {
-      otherTab = `${tabName} (інші)`;
-      try {
-        await sheets.spreadsheets.batchUpdate({
-          spreadsheetId: SHEET_ID,
-          resource: { requests: [{ addSheet: { properties: { title: otherTab } } }] }
-        });
-      } catch (e) { /* вкладка вже є — ок */ }
-
-      const SCHEME_LABEL = {
-        fixed_rate: 'Ставочник', mentor: 'Наставник', recruiter: 'Рекрутер',
-        hourly: 'Вантажник (год.)', hourly_fixed: 'Вантажник (фікс+год.)',
-        piece_warehouse: 'Склад-відрядник', warehouse_hybrid: 'Начальник складу',
-        hot: 'Гарячі продажі', rop: 'РОП',
-      };
-      const otherHeader = [
-        [`ЗП ${MONTHS[m]} ${y} — інші відділи`,'','','','','','','','','','','','','',''],
-        ['ІМЯ','Відділ','Рівень','Схема',
-         'Компонент 1','Сума 1','Компонент 2','Сума 2','Компонент 3','Сума 3','Компонент 4','Сума 4',
-         'Корегування','Виплата1','Виплата2','РАЗОМ'],
-      ];
-      const otherDataRows = otherRows.map(r => {
-        const items = r.breakdown_components || [];
-        const slots = [0, 1, 2, 3].map(i => items[i] || null);
-        return [
-          r.name, r.dept_name, LEVEL[r.level] || r.level, SCHEME_LABEL[r.scheme_type] || r.scheme_type,
-          ...slots.flatMap(it => [it ? it.label : '', it ? it.amount : '']),
-          r.adj_total || '',
-          r.payout1 != null ? r.payout1 : (r.advance != null ? r.advance : ''),
-          r.payout2 != null ? r.payout2 : (r.remainder != null ? r.remainder : ''),
-          r.total,
-        ];
-      });
-      const otherValues = [...otherHeader, ...otherDataRows];
       await sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
-        range: `${otherTab}!A1`,
+        range: `${tabName}!A1`,
         valueInputOption: 'USER_ENTERED',
-        resource: { values: otherValues },
+        resource: { values },
       });
-      otherCount = otherRows.length;
-    }
-
-    // ── третя вкладка: гарячі продажі окремо — фіксовані 14 колонок компонентів
-    //    (7 на період 1-14 + 7 на період 15-кінець), бо в 4 узагальнені слоти
-    //    вкладки «(інші)» ця схема не влізає. Кожна колонка — завжди той самий
-    //    компонент на тому самому місці (нулі не приховуються, щоб не зсунути
-    //    сусідні колонки).
-    let hotTab = null, hotCount = 0;
-    if (hotRows.length) {
-      hotTab = `${tabName} (гарячі)`;
-      try {
-        await sheets.spreadsheets.batchUpdate({
-          spreadsheetId: SHEET_ID,
-          resource: { requests: [{ addSheet: { properties: { title: hotTab } } }] }
-        });
-      } catch (e) { /* вкладка вже є — ок */ }
-
-      const hotHeader = [
-        [`ЗП ${MONTHS[m]} ${y} — гарячі продажі`,'','','','','','','','','','','','','','','','','','','',''],
-        ['ІМЯ','Відділ','Рівень',
-         'П1: Ставка','П1: ОФІС1345 %','П1: Паста %','П1: ОФІС2 %','П1: Акція230 %','П1: Доплата','П1: Штраф',
-         'П2: Ставка','П2: ОФІС1345 %','П2: Паста %','П2: ОФІС2 %','П2: Акція230 %','П2: Доплата','П2: Штраф',
-         'Корегування','Виплата1','Виплата2','РАЗОМ'],
-      ];
-      const hotDataRows = hotRows.map(r => {
-        const p1 = r.period1 || {}, p2 = r.period2 || {};
-        return [
-          r.name, r.dept_name, LEVEL[r.level] || r.level,
-          p1.rate || 0, p1.pay_office || 0, p1.pay_pasta || 0, p1.pay_office2 || 0, p1.pay_action || 0, p1.bonus || 0, p1.penalty || 0,
-          p2.rate || 0, p2.pay_office || 0, p2.pay_pasta || 0, p2.pay_office2 || 0, p2.pay_action || 0, p2.bonus || 0, p2.penalty || 0,
-          r.adj_total || '',
-          r.payout1 != null ? r.payout1 : '',
-          r.payout2 != null ? r.payout2 : '',
-          r.total,
-        ];
-      });
-      const hotValues = [...hotHeader, ...hotDataRows];
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: `${hotTab}!A1`,
-        valueInputOption: 'USER_ENTERED',
-        resource: { values: hotValues },
-      });
-      hotCount = hotRows.length;
+      tabsWritten.push({ tab: tabName, count: deptRows.length });
     }
 
     res.json({
       ok: true,
-      message: `Експортовано ${salaries.length} рядків у "${tabName}"`
-        + (otherCount ? ` та ${otherCount} рядків у "${otherTab}"` : '')
-        + (hotCount ? ` та ${hotCount} рядків у "${hotTab}"` : ''),
-      tab: tabName, other_tab: otherTab, hot_tab: hotTab,
+      message: `Експортовано ${rows.length} рядків у ${tabsWritten.length} вкладок: `
+        + tabsWritten.map(t => `"${t.tab}" (${t.count})`).join(', '),
+      tabs: tabsWritten,
     });
   } catch(e) {
     console.error('Sheets export error:', e.message);
