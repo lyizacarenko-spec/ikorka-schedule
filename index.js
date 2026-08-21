@@ -774,10 +774,17 @@ app.post('/api/export/salary', async (req, res) => {
 
       // ── форматування: жирний заголовок, сірий фонд-рядок, жирні+залиті шапки
       //    колонок, заморожені верхні рядки + перша колонка, автоширина колонок ──
+      let fmtError = null;
       if (sheetId != null) {
         try {
           const maxCols = Math.max(...values.map(v => v.length), 1);
           const requests = [
+            // спершу розʼєднати title-рядок — інакше повторний merge при
+            // переекспорті в ту саму вкладку падає з помилкою і ВЕСЬ
+            // batchUpdate (усе форматування) мовчки скасовується
+            { unmergeCells: {
+                range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: maxCols },
+            } },
             { repeatCell: {
                 range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: maxCols },
                 cell: { userEnteredFormat: { textFormat: { bold: true, fontSize: 12, foregroundColor: { red: 1, green: 1, blue: 1 } }, backgroundColor: { red: 0.16, green: 0.11, blue: 0.08 } } },
@@ -796,9 +803,6 @@ app.post('/api/export/salary', async (req, res) => {
                 properties: { sheetId, gridProperties: { frozenRowCount: (headerRowIndices[0] ?? 1) + 1, frozenColumnCount: 1 } },
                 fields: 'gridProperties.frozenRowCount,gridProperties.frozenColumnCount',
             } },
-            { autoResizeDimensions: {
-                dimensions: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: maxCols },
-            } },
           ];
           headerRowIndices.forEach(idx => {
             requests.push({ repeatCell: {
@@ -808,18 +812,26 @@ app.post('/api/export/salary', async (req, res) => {
             } });
           });
           await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, resource: { requests } });
+          // автоширина — окремим викликом, щоб помилка в ній (рідко) не скасовувала решту форматування
+          await sheets.spreadsheets.batchUpdate({
+            spreadsheetId: SHEET_ID,
+            resource: { requests: [{ autoResizeDimensions: { dimensions: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: maxCols } } }] },
+          });
         } catch (fmtErr) {
-          console.error('Sheets formatting error (ignored):', fmtErr.message);
+          fmtError = fmtErr.message;
+          console.error('Sheets formatting error:', fmtErr.message);
         }
       }
 
-      tabsWritten.push({ tab: tabName, count: deptRows.length });
+      tabsWritten.push({ tab: tabName, count: deptRows.length, format_error: fmtError });
     }
 
+    const fmtErrors = tabsWritten.filter(t => t.format_error);
     res.json({
       ok: true,
       message: `Експортовано ${rows.length} рядків у ${tabsWritten.length} вкладок: `
-        + tabsWritten.map(t => `"${t.tab}" (${t.count})`).join(', '),
+        + tabsWritten.map(t => `"${t.tab}" (${t.count})`).join(', ')
+        + (fmtErrors.length ? ` ⚠️ Форматування не застосувалось: ${fmtErrors.map(t=>t.tab+' — '+t.format_error).join('; ')}` : ''),
       tabs: tabsWritten,
     });
   } catch(e) {
