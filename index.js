@@ -672,12 +672,21 @@ app.post('/api/export/salary', async (req, res) => {
       const { name: deptName, rows: deptRows } = byDept[deptCode];
       const tabName = `${prefix} — ${deptName}`.slice(0, 99); // ліміт Google Sheets на назву вкладки
 
+      let sheetId = null;
       try {
-        await sheets.spreadsheets.batchUpdate({
+        const addResp = await sheets.spreadsheets.batchUpdate({
           spreadsheetId: SHEET_ID,
           resource: { requests: [{ addSheet: { properties: { title: tabName } } }] }
         });
-      } catch (e) { /* вкладка вже є — ок, перезапишемо вміст */ }
+        sheetId = addResp.data.replies[0].addSheet.properties.sheetId;
+      } catch (e) {
+        // вкладка вже є — знайти її sheetId для форматування
+        try {
+          const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+          const found = (meta.data.sheets || []).find(s => s.properties.title === tabName);
+          sheetId = found ? found.properties.sheetId : null;
+        } catch (e2) { sheetId = null; }
+      }
 
       const fb = fundBreakdown(deptRows);
       const fundLine = [`Ставка: ${Math.round(fb.rate)}`, `%: ${Math.round(fb.pct)}`,
@@ -685,26 +694,28 @@ app.post('/api/export/salary', async (req, res) => {
         `Фонд відділу: ${Math.round(deptRows.reduce((s,r)=>s+(r.total||0),0))}`];
 
       let values;
+      const headerRowIndices = []; // рядки-заголовки колонок (0-індекс) — для жирного+заливки+заморозки
+
       if (deptCode === 'hot') {
         // гарячі — фіксовані 14 колонок компонентів (7 на період × 2 періоди)
-        const header = [
+        values = [
           [`ЗП ${MONTHS[m]} ${y} — ${deptName}`],
           fundLine,
-          ['ІМЯ','Рівень',
+        ];
+        headerRowIndices.push(values.length);
+        values.push(['ІМЯ','Рівень',
            'П1: Ставка','П1: ОФІС1345 %','П1: Паста %','П1: ОФІС2 %','П1: Акція230 %','П1: Доплата','П1: Штраф',
            'П2: Ставка','П2: ОФІС1345 %','П2: Паста %','П2: ОФІС2 %','П2: Акція230 %','П2: Доплата','П2: Штраф',
-           'Корегування','Виплата1','Виплата2','РАЗОМ'],
-        ];
-        const data = deptRows.map(r => {
+           'Корегування','Виплата1','Виплата2','РАЗОМ']);
+        deptRows.forEach(r => {
           const p1 = r.period1 || {}, p2 = r.period2 || {};
-          return [
+          values.push([
             r.name, LEVEL[r.level] || r.level,
             p1.rate||0, p1.pay_office||0, p1.pay_pasta||0, p1.pay_office2||0, p1.pay_action||0, p1.bonus||0, p1.penalty||0,
             p2.rate||0, p2.pay_office||0, p2.pay_pasta||0, p2.pay_office2||0, p2.pay_action||0, p2.bonus||0, p2.penalty||0,
             r.adj_total || '', r.payout1 ?? '', r.payout2 ?? '', r.total,
-          ];
+          ]);
         });
-        values = [...header, ...data];
       } else {
         // Продажі/відмови (percent_plan/orders_count) — окремий блок з "рідними"
         // бізнес-колонками (План/Оборот/% повернень/Ставка/Бонус%…), як і раніше.
@@ -717,6 +728,7 @@ app.post('/api/export/salary', async (req, res) => {
         values = [[`ЗП ${MONTHS[m]} ${y} — ${deptName}`], fundLine];
 
         if (salesRows.length) {
+          headerRowIndices.push(values.length);
           values.push(['ІМЯ','Рівень','Кол роб.днів','План','Оборот','% повернень','Ставка','Бонус %','% бонус грн','Переробка','Навчання','Доплата','Штраф','Корегування','Виплата1','Виплата2','РАЗОМ']);
           salesRows.forEach(r => {
             values.push([
@@ -734,6 +746,7 @@ app.post('/api/export/salary', async (req, res) => {
 
         if (otherSchemeRows.length) {
           if (salesRows.length) values.push([]); // порожній рядок-розділювач між блоками
+          headerRowIndices.push(values.length);
           values.push(['ІМЯ','Рівень','Схема',
             'Компонент 1','Сума 1','Компонент 2','Сума 2','Компонент 3','Сума 3','Компонент 4','Сума 4',
             'Корегування','Виплата1','Виплата2','РАЗОМ']);
@@ -758,6 +771,48 @@ app.post('/api/export/salary', async (req, res) => {
         valueInputOption: 'USER_ENTERED',
         resource: { values },
       });
+
+      // ── форматування: жирний заголовок, сірий фонд-рядок, жирні+залиті шапки
+      //    колонок, заморожені верхні рядки + перша колонка, автоширина колонок ──
+      if (sheetId != null) {
+        try {
+          const maxCols = Math.max(...values.map(v => v.length), 1);
+          const requests = [
+            { repeatCell: {
+                range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: maxCols },
+                cell: { userEnteredFormat: { textFormat: { bold: true, fontSize: 12, foregroundColor: { red: 1, green: 1, blue: 1 } }, backgroundColor: { red: 0.16, green: 0.11, blue: 0.08 } } },
+                fields: 'userEnteredFormat(textFormat,backgroundColor)',
+            } },
+            { mergeCells: {
+                range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: maxCols },
+                mergeType: 'MERGE_ALL',
+            } },
+            { repeatCell: {
+                range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: maxCols },
+                cell: { userEnteredFormat: { textFormat: { italic: true, fontSize: 9 }, backgroundColor: { red: 0.94, green: 0.92, blue: 0.87 } } },
+                fields: 'userEnteredFormat(textFormat,backgroundColor)',
+            } },
+            { updateSheetProperties: {
+                properties: { sheetId, gridProperties: { frozenRowCount: (headerRowIndices[0] ?? 1) + 1, frozenColumnCount: 1 } },
+                fields: 'gridProperties.frozenRowCount,gridProperties.frozenColumnCount',
+            } },
+            { autoResizeDimensions: {
+                dimensions: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: maxCols },
+            } },
+          ];
+          headerRowIndices.forEach(idx => {
+            requests.push({ repeatCell: {
+              range: { sheetId, startRowIndex: idx, endRowIndex: idx + 1, startColumnIndex: 0, endColumnIndex: maxCols },
+              cell: { userEnteredFormat: { textFormat: { bold: true }, backgroundColor: { red: 0.9, green: 0.86, blue: 0.78 } } },
+              fields: 'userEnteredFormat(textFormat,backgroundColor)',
+            } });
+          });
+          await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, resource: { requests } });
+        } catch (fmtErr) {
+          console.error('Sheets formatting error (ignored):', fmtErr.message);
+        }
+      }
+
       tabsWritten.push({ tab: tabName, count: deptRows.length });
     }
 
