@@ -2573,12 +2573,16 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     let paidRows = [];
     if (empIds.length && payDateIsos.length) {
       paidRows = await q(
-        `SELECT employee_id, pay_date, paid FROM warehouse_payout_status
+        `SELECT employee_id, pay_date, paid, amount_override FROM warehouse_payout_status
          WHERE employee_id = ANY($1) AND pay_date = ANY($2)`,
         [empIds, payDateIsos]);
     }
     const paidMap = {}; // "empId_YYYY-MM-DD" -> true
-    paidRows.forEach(r => { if (r.paid) paidMap[`${r.employee_id}_${ymd(r.pay_date)}`] = true; });
+    const overrideMap = {}; // "empId_YYYY-MM-DD" -> number|null
+    paidRows.forEach(r => {
+      if (r.paid) paidMap[`${r.employee_id}_${ymd(r.pay_date)}`] = true;
+      if (r.amount_override != null) overrideMap[`${r.employee_id}_${ymd(r.pay_date)}`] = parseFloat(r.amount_override);
+    });
 
     const buildBreakdownWeek = (scheme, comp) => {
       const items = [];
@@ -2606,9 +2610,14 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
           comp.hourPay += c.hourPay; comp.hours += c.hours;
         }
         const sum = comp.pack + comp.fasovka + comp.exit + comp.hourPay;
+        const key = `${e.id}_${pdIso}`;
+        const override = overrideMap[key] != null ? overrideMap[key] : null;
         return {
           employee_id: e.id, name: e.name, sum,
-          paid: !!paidMap[`${e.id}_${pdIso}`],
+          override, // ручна сума "факт виплачено", якщо задана — інакше null (тоді береться sum)
+          pay: override != null ? override : sum, // фактична сума до виплати
+          round20: Math.round(sum / 20) * 20, // підказка: округлення до найближчих 20 грн
+          paid: !!paidMap[key],
           pay_date_iso: pdIso,
           breakdown: buildBreakdownWeek(schemeById[e.id], comp),
         };
@@ -2623,10 +2632,11 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
       };
     });
 
-    const empTotals = emps.map(e => ({
-      employee_id: e.id, name: e.name,
-      total: weekRows.reduce((a, wr) => a + (wr.per_emp.find(p => p.employee_id === e.id)?.sum || 0), 0),
-    }));
+    const empTotals = emps.map(e => {
+      const calcTotal = weekRows.reduce((a, wr) => a + (wr.per_emp.find(p => p.employee_id === e.id)?.sum || 0), 0);
+      const paidTotal = weekRows.reduce((a, wr) => a + (wr.per_emp.find(p => p.employee_id === e.id)?.pay || 0), 0);
+      return { employee_id: e.id, name: e.name, total: calcTotal, paid_total: paidTotal, delta: Math.round((paidTotal - calcTotal) * 100) / 100 };
+    });
 
     res.json({ year: y, month: m, emps: emps.map(e => ({ id: e.id, name: e.name })), weeks: weekRows, emp_totals: empTotals });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2638,16 +2648,23 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
 // як у основного payout_status — тижні складу не мапляться 1:1 на місяці.
 app.put('/api/finance/warehouse-payout-status', requireFinance, async (req, res) => {
   try {
-    const { employee_id, pay_date, paid } = req.body;
+    const { employee_id, pay_date } = req.body;
     if (!employee_id || !pay_date) return res.status(400).json({ error: 'employee_id/pay_date required' });
+    const paidProvided = Object.prototype.hasOwnProperty.call(req.body, 'paid');
+    const overrideProvided = Object.prototype.hasOwnProperty.call(req.body, 'amount_override');
+    const overrideVal = (req.body.amount_override === '' || req.body.amount_override == null) ? null : req.body.amount_override;
     const rows = await q(
-      `INSERT INTO warehouse_payout_status (employee_id, pay_date, paid, paid_at, updated_at)
-       VALUES ($1,$2,$3, CASE WHEN $3 THEN NOW() ELSE NULL END, NOW())
+      `INSERT INTO warehouse_payout_status (employee_id, pay_date, paid, amount_override, paid_at, updated_at)
+       VALUES ($1,$2,$3,$4, CASE WHEN $3 THEN NOW() ELSE NULL END, NOW())
        ON CONFLICT (employee_id, pay_date)
-       DO UPDATE SET paid=$3, paid_at = CASE WHEN $3 THEN COALESCE(warehouse_payout_status.paid_at, NOW()) ELSE NULL END,
+       DO UPDATE SET paid = CASE WHEN $6 THEN $3 ELSE warehouse_payout_status.paid END,
+                     amount_override = CASE WHEN $5 THEN $4 ELSE warehouse_payout_status.amount_override END,
+                     paid_at = CASE WHEN $6 AND $3 THEN COALESCE(warehouse_payout_status.paid_at, NOW())
+                                    WHEN $6 AND NOT $3 THEN NULL
+                                    ELSE warehouse_payout_status.paid_at END,
                      updated_at=NOW()
        RETURNING *`,
-      [employee_id, pay_date, paid === true]
+      [employee_id, pay_date, req.body.paid === true, overrideVal, overrideProvided, paidProvided]
     );
     res.json({ ...rows[0], pay_date: ymd(rows[0].pay_date) });
   } catch (e) { res.status(500).json({ error: e.message }); }
