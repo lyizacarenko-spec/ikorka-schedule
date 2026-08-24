@@ -1670,7 +1670,53 @@ app.put('/api/payout-status', requireFinance, async (req, res) => {
       [employee_id, calc_year, calc_month, payout_no,
        paid === true, overrideVal, comment || null, overrideProvided]
     );
-    res.json(rows[0]);
+
+    // ═══ АВТОПЕРЕНЕСЕННЯ НЕДОПЛАТИ ═══
+    // Коли позначають ДРУГУ виплату (payout_no=2) як "виплачено" — звіряємо
+    // скільки реально видали (з урахуванням override на обох виплатах) із тим,
+    // скільки мало бути за розрахунком. Якщо видали менше — різницю автоматично
+    // додаємо корегуванням на НАСТУПНИЙ місяць (щоб не забути доплатити).
+    // Захист від дублю: перевіряємо, чи вже є таке перенесення (мітка [carry:y-m]).
+    let carryForward = null;
+    if (payout_no === 2 && paid === true) {
+      try {
+        const allRows = await computeFinanceRows(parseInt(calc_year), parseInt(calc_month));
+        const empRow = allRows.find(r => r.employee_id === parseInt(employee_id));
+        if (empRow && empRow.total != null) {
+          const psRows = await q(
+            `SELECT payout_no, amount_override FROM payout_status WHERE employee_id=$1 AND calc_year=$2 AND calc_month=$3`,
+            [employee_id, calc_year, calc_month]
+          );
+          const ov1 = psRows.find(p => p.payout_no === 1)?.amount_override;
+          const ov2 = psRows.find(p => p.payout_no === 2)?.amount_override;
+          const paidActual = (ov1 != null ? parseFloat(ov1) : (empRow.payout1 || 0))
+                            + (ov2 != null ? parseFloat(ov2) : (empRow.payout2 || 0));
+          const shortfall = Math.round((empRow.total - paidActual) * 100) / 100;
+          if (shortfall > 1) {
+            let ny = parseInt(calc_year), nm = parseInt(calc_month) + 1;
+            if (nm > 12) { nm = 1; ny++; }
+            const marker = `[carry:${calc_year}-${calc_month}]`;
+            const dup = await q(
+              `SELECT 1 FROM salary_adjustments WHERE employee_id=$1 AND calc_year=$2 AND calc_month=$3 AND comment LIKE $4`,
+              [employee_id, ny, nm, `%${marker}%`]
+            );
+            if (!dup.length) {
+              await q(
+                `INSERT INTO salary_adjustments (employee_id, calc_year, calc_month, type, amount, comment)
+                 VALUES ($1,$2,$3,$4,$5,$6)`,
+                [employee_id, ny, nm, 'доплата', shortfall,
+                 `Автоперенесення недоплати за ${calc_month}.${calc_year} ${marker}`]
+              );
+              carryForward = { amount: shortfall, year: ny, month: nm };
+            }
+          }
+        }
+      } catch (carryErr) {
+        console.error('Автоперенесення недоплати — помилка (ігнорується):', carryErr.message);
+      }
+    }
+
+    res.json({ ...rows[0], carry_forward: carryForward });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
