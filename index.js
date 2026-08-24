@@ -2003,12 +2003,14 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         // корегування
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
-        // total = фікс(±дні) + фасовка + корегування
+        // total = фікс(±дні) + фасовка + корегування (інформаційна сума за місяць)
         const base = parseFloat(emp.base_rate) || 0;
         const total = fixCalc.total + fasTotal + adjTotal;
-        // виплати: 2 (10-15) = base/2 фікс; 1 (1-5) = решта (фікс-допки + фасовка + корегування)
-        const payout1 = base / 2;        // аванс 15-го
-        const payout2 = total - payout1;  // залишок 1-го наст. місяця
+        // виплати: ставка виплачується 2 РАЗИ НА МІСЯЦЬ (15-те + 1-ше наст.),
+        // фасовка — ОКРЕМО ЩОТИЖНЯ (див. "Склад по тижнях"), тому в ці дві
+        // виплати вона НЕ входить — інакше подвійний облік (тиждень + місяць)
+        const payout1 = base / 2;                         // аванс 15-го — половина окладу
+        const payout2 = fixCalc.total - payout1 + adjTotal; // залишок ставки (±переробка) + корегування, БЕЗ фасовки
         return {
           employee_id: emp.id, name: emp.name,
           dept_code: emp.dept_code, dept_name: emp.dept_name,
