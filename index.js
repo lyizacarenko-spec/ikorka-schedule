@@ -1691,7 +1691,13 @@ app.put('/api/payout-status', requireFinance, async (req, res) => {
           const ov2 = psRows.find(p => p.payout_no === 2)?.amount_override;
           const paidActual = (ov1 != null ? parseFloat(ov1) : (empRow.payout1 || 0))
                             + (ov2 != null ? parseFloat(ov2) : (empRow.payout2 || 0));
-          const shortfall = Math.round((empRow.total - paidActual) * 100) / 100;
+          // Порівнюємо з РОЗРАХОВАНОЮ сумою двох щомісячних виплат (payout1+payout2),
+          // а НЕ з r.total — для схем типу warehouse_hybrid total навмисно включає
+          // фасовку (вона рахується й виплачується окремо щотижня в "Склад по
+          // тижнях"), тож звірка з total завжди хибно показувала б недоплату
+          // рівно на суму фасовки.
+          const shouldHavePaid = (empRow.payout1 || 0) + (empRow.payout2 || 0);
+          const shortfall = Math.round((shouldHavePaid - paidActual) * 100) / 100;
           if (shortfall > 1) {
             let ny = parseInt(calc_year), nm = parseInt(calc_month) + 1;
             if (nm > 12) { nm = 1; ny++; }
