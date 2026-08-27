@@ -2499,10 +2499,19 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     });
     // агрегати по відділах (лише ті, у кого порахувалось) + скільки ще «на авансі»
     // (виплата 1 вже є, а total ще null — оборот не внесено)
+    // РОП/тімлід/керівник (NO_PLAN_ROLES) — рахуємо ОКРЕМОЮ групою "Лінійні
+    // керівники", а не всередині середньої по відділу продажів (інакше їхня
+    // зовсім інша за розміром ЗП спотворює середню по звичайних менеджерах).
+    // r.dept_code саме поле НЕ чіпаємо — воно й далі потрібне для контролю
+    // доступу (req.user.depts) та посилання "› у відділ" при кліку.
+    const groupKey = r => ['rop','head','teamlead'].includes(r.role) ? '__leaders__' : r.dept_code;
+    const groupName = r => ['rop','head','teamlead'].includes(r.role) ? 'Лінійні керівники' : r.dept_name;
+
     const deptPeople = {};
     rows.forEach(r => {
       if (r.payout1 == null && r.total == null) return; // немає жодних даних (керівна роль тощо)
-      const p = deptPeople[r.dept_code] = deptPeople[r.dept_code] || { dept_code: r.dept_code, dept_name: r.dept_name, total_people: 0, pending: 0 };
+      const gk = groupKey(r);
+      const p = deptPeople[gk] = deptPeople[gk] || { dept_code: gk, dept_name: groupName(r), total_people: 0, pending: 0 };
       p.total_people += 1;
       if (r.total == null) p.pending += 1;
     });
@@ -2510,8 +2519,9 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     const deptAgg = {};
     rows.forEach(r => {
       if (r.total == null) return;
-      const a = deptAgg[r.dept_code] = deptAgg[r.dept_code] || {
-        dept_code: r.dept_code, dept_name: r.dept_name,
+      const gk = groupKey(r);
+      const a = deptAgg[gk] = deptAgg[gk] || {
+        dept_code: gk, dept_name: groupName(r),
         count: 0, sum: 0, min: Infinity, max: -Infinity,
       };
       a.count += 1; a.sum += r.total;
