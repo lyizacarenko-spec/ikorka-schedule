@@ -472,13 +472,14 @@ app.get('/api/plans', async (req, res) => {
 
 app.put('/api/plans', async (req, res) => {
   try {
-    const { department_id, plan_year, plan_month, level, plan_amount } = req.body;
+    const { department_id, plan_year, plan_month, level, plan_amount, team } = req.body;
+    const teamVal = team || null;
     const rows = await q(
-      `INSERT INTO level_plans (department_id, plan_year, plan_month, level, plan_amount, updated_at)
-       VALUES ($1,$2,$3,$4,$5,NOW())
-       ON CONFLICT (department_id, plan_year, plan_month, level)
+      `INSERT INTO level_plans (department_id, plan_year, plan_month, level, plan_amount, team, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,NOW())
+       ON CONFLICT (department_id, plan_year, plan_month, level, COALESCE(team, ''))
        DO UPDATE SET plan_amount=$5, updated_at=NOW() RETURNING *`,
-      [department_id, plan_year, plan_month, level, plan_amount]
+      [department_id, plan_year, plan_month, level, plan_amount, teamVal]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -493,15 +494,18 @@ app.get('/api/stats', async (req, res) => {
     const start = `${y}-${String(m).padStart(2,'0')}-01`;
     const end   = new Date(y, m, 0).toISOString().slice(0,10);
 
-    // Кількість активних менеджерів по рівнях і відділах
+    // Кількість активних менеджерів по рівнях, ВІДДІЛАХ і КОМАНДАХ (team) —
+    // потрібно для РЗПК, де з вересня в кожної команди (Роздріб/Малий опт/
+    // Ресейл) може бути свій окремий план. Для решти відділів team просто
+    // ігнорується (там team-специфічних планів нема — рахується як раніше).
     // РОП, тімлід і керівник не рахуються в план
     const empCounts = await q(`
-      SELECT d.id AS dept_id, d.code AS dept_code, e.level, COUNT(*) AS cnt
+      SELECT d.id AS dept_id, d.code AS dept_code, e.level, e.team, COUNT(*) AS cnt
       FROM employees e JOIN departments d ON d.id = e.department_id
       WHERE e.is_active = true
         AND e.role NOT IN ('rop','head','teamlead')
         AND e.level != 'new'
-      GROUP BY d.id, d.code, e.level
+      GROUP BY d.id, d.code, e.level, e.team
     `);
 
     const plans = await q(`
@@ -533,12 +537,19 @@ app.get('/api/stats', async (req, res) => {
       let planTotal = 0;
       const planBreakdown = {};
       ['top','mid','jun'].forEach(lvl => {
-        const empRow  = empCounts.find(r => r.dept_id === dept.id && r.level === lvl);
-        const planRow = plans.find(r => r.department_id === dept.id && r.level === lvl);
-        const cnt  = parseInt(empRow?.cnt  || 0);
-        const pamt = parseFloat(planRow?.plan_amount || 0);
-        planBreakdown[lvl] = { cnt, plan_per_person: pamt, subtotal: cnt * pamt };
-        planTotal += cnt * pamt;
+        // рядки цього рівня в цьому відділі, розбиті по team (для РЗПК — до 3 команд)
+        const rowsForLevel = empCounts.filter(r => r.dept_id === dept.id && r.level === lvl);
+        let cnt = 0, subtotal = 0;
+        rowsForLevel.forEach(r => {
+          const c = parseInt(r.cnt) || 0;
+          // спершу шукаємо план саме для цієї команди (team), інакше — дефолтний (team IS NULL)
+          const teamPlan = r.team ? plans.find(p => p.department_id === dept.id && p.level === lvl && p.team === r.team) : null;
+          const planRow = teamPlan || plans.find(p => p.department_id === dept.id && p.level === lvl && !p.team);
+          const pamt = parseFloat(planRow?.plan_amount || 0);
+          cnt += c; subtotal += c * pamt;
+        });
+        planBreakdown[lvl] = { cnt, plan_per_person: cnt ? subtotal / cnt : 0, subtotal };
+        planTotal += subtotal;
       });
 
       const detailRow = revDetail.find(r => r.department_id === dept.id);
@@ -2504,8 +2515,9 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     // зовсім інша за розміром ЗП спотворює середню по звичайних менеджерах).
     // r.dept_code саме поле НЕ чіпаємо — воно й далі потрібне для контролю
     // доступу (req.user.depts) та посилання "› у відділ" при кліку.
-    const groupKey = r => ['rop','head','teamlead'].includes(r.role) ? '__leaders__' : r.dept_code;
-    const groupName = r => ['rop','head','teamlead'].includes(r.role) ? 'Лінійні керівники' : r.dept_name;
+    const isSalesLikeDept = code => SALES_DEPTS.includes(code) || ORDER_DEPTS.includes(code);
+    const groupKey = r => (isSalesLikeDept(r.dept_code) && ['rop','teamlead'].includes(r.role)) ? '__leaders__' : r.dept_code;
+    const groupName = r => (isSalesLikeDept(r.dept_code) && ['rop','teamlead'].includes(r.role)) ? 'Лінійні керівники' : r.dept_name;
 
     const deptPeople = {};
     rows.forEach(r => {
