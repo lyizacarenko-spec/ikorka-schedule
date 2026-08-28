@@ -485,6 +485,21 @@ app.put('/api/plans', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Видалення конкретного плану (коли поле очистили в інтерфейсі — має справді
+// прибрати рядок з БД, а не просто лишити старе значення).
+app.delete('/api/plans', async (req, res) => {
+  try {
+    const { department_id, plan_year, plan_month, level, team } = req.body;
+    const teamVal = team || null;
+    await q(
+      `DELETE FROM level_plans
+       WHERE department_id=$1 AND plan_year=$2 AND plan_month=$3 AND level=$4 AND COALESCE(team,'')=COALESCE($5,'')`,
+      [department_id, plan_year, plan_month, level, teamVal]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── STATS: план відділу = сума планів активних менеджерів ────
 app.get('/api/stats', async (req, res) => {
   try {
