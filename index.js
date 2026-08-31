@@ -2345,24 +2345,37 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
       };
     });
 
-    // авансові виплати заздалегідь — зменшують payout1 (а якщо не вистачає — і payout2),
-    // не змінюючи саму ставку/total
+    // авансові виплати заздалегідь — аванс, виданий ДО 15-го, зменшує ту
+    // виплату, що покриває період до 15-го; аванс, виданий 15-го і пізніше —
+    // зменшує виплату, що покриває період 15–1-ше. Для звичайних схем
+    // (pay_schedule='staff'/'hot'/...) це payout1 (15-те)/payout2 (1-ше)
+    // відповідно; для 'sales' (продажі/відмови/РОП/холодка) — навпаки,
+    // бо там payout2 виплачується 15-го, а payout1 — 1-го наступного.
     const advRows = await q(
-      `SELECT employee_id, SUM(amount) AS total FROM advance_payments
-       WHERE calc_year=$1 AND calc_month=$2 GROUP BY employee_id`, [y, m]);
-    const advByEmp = {};
-    advRows.forEach(a => { advByEmp[a.employee_id] = parseFloat(a.total) || 0; });
+      `SELECT employee_id, payment_date, amount FROM advance_payments
+       WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+    const advBefore15 = {}, advFrom15 = {};
+    advRows.forEach(a => {
+      const amt = parseFloat(a.amount) || 0;
+      const day = a.payment_date ? new Date(a.payment_date).getUTCDate() : 1; // без дати — вважаємо "до 15-го"
+      const bucket = day < 15 ? advBefore15 : advFrom15;
+      bucket[a.employee_id] = (bucket[a.employee_id] || 0) + amt;
+    });
 
     rows.forEach(r => {
-      const adv = advByEmp[r.employee_id] || 0;
-      r.advance_taken = adv;
-      if (adv > 0 && r.payout1 != null) {
+      const advToP1 = r.pay_schedule === 'sales' ? (advFrom15[r.employee_id] || 0) : (advBefore15[r.employee_id] || 0);
+      const advToP2 = r.pay_schedule === 'sales' ? (advBefore15[r.employee_id] || 0) : (advFrom15[r.employee_id] || 0);
+      r.advance_taken = advToP1 + advToP2; // для сумісності — загальна сума за місяць
+      r.advance_p1 = advToP1;
+      r.advance_p2 = advToP2;
+      if ((advToP1 > 0 || advToP2 > 0) && r.payout1 != null) {
         r.payout1_before_advance = r.payout1;
-        const leftover = Math.max(0, adv - r.payout1);
-        r.payout1 = Math.max(0, r.payout1 - adv);
-        if (leftover > 0 && r.payout2 != null) {
+        const leftover1 = Math.max(0, advToP1 - r.payout1);
+        r.payout1 = Math.max(0, r.payout1 - advToP1);
+        if (r.payout2 != null) {
           r.payout2_before_advance = r.payout2;
-          r.payout2 = Math.max(0, r.payout2 - leftover);
+          const afterOwn = Math.max(0, r.payout2 - advToP2);
+          r.payout2 = Math.max(0, afterOwn - leftover1);
         }
       }
     });
