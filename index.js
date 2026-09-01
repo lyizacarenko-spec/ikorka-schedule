@@ -2542,7 +2542,15 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     } catch (e) { corrStat = []; }
     const corrByEmp = {};
     corrStat.forEach(c => { corrByEmp[c.employee_id] = c; });
-
+        // статуси перевірки керівником (жовта галочка)
+        let reviewStat = [];
+        try {
+          reviewStat = await q(`SELECT * FROM payout_review_status WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+        } catch (e) { reviewStat = []; }
+        const reviewByEmp = {};
+        reviewStat.forEach(p => {
+          (reviewByEmp[p.employee_id] = reviewByEmp[p.employee_id] || {})[p.payout_no] = p;
+        });
     // приклеїти статуси виплат + ручні суми (override має пріоритет)
     rows.forEach(r => {
       const ps = payByEmp[r.employee_id] || {};
