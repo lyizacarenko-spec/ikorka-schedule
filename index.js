@@ -1751,7 +1751,39 @@ app.put('/api/payout-status', requireFinance, async (req, res) => {
     res.json({ ...rows[0], carry_forward: carryForward });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+// ═══════════════════════════════════════════════════════════
+// ЖОВТА ГАЛОЧКА «ПЕРЕВІРЕНО КЕРІВНИКОМ» — ставить будь-хто з
+// доступом до фінансів цього відділу (не обов'язково бухгалтер).
+// Окремо від зеленої «виплачено» (payout_status, ставить бухгалтер).
+// ═══════════════════════════════════════════════════════════
+app.get('/api/payout-review-status', requireFinance, async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    res.json(await q(
+      `SELECT * FROM payout_review_status WHERE calc_year=$1 AND calc_month=$2`, [y, m]));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
+app.put('/api/payout-review-status', requireFinance, async (req, res) => {
+  try {
+    const { employee_id, calc_year, calc_month, payout_no, reviewed } = req.body;
+    const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
+    if (empRow.length && !canDept(req.user, empRow[0].code))
+      return res.status(403).json({ error: 'Немає доступу до цього відділу' });
+    const rows = await q(
+      `INSERT INTO payout_review_status (employee_id, calc_year, calc_month, payout_no, reviewed, reviewed_by, reviewed_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $5 THEN NOW() ELSE NULL END, NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month, payout_no)
+       DO UPDATE SET reviewed=$5, reviewed_by=$6,
+                     reviewed_at = CASE WHEN $5 THEN NOW() ELSE NULL END,
+                     updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, payout_no, reviewed === true, req.user.full_name]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 // ═══════════════════════════════════════════════════════════
 // СТАТУС «ВИДАНО В КОНВЕРТІ» для корегувань (готівкою, окремо від
 // основних виплат) — один прапорець на співробітника/місяць
