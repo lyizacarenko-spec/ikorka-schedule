@@ -916,7 +916,6 @@ app.post('/api/salary-adjustments', async (req, res) => {
       `INSERT INTO salary_adjustments (employee_id, calc_year, calc_month, type, amount, comment, alloc_dept_code)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
       [employee_id, calc_year, calc_month, type || 'інше', amount || 0, comment || null, alloc_dept_code || null]
-    calc_year, calc_month, type || 'інше', amount || 0, comment || null]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
