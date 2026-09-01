@@ -679,6 +679,8 @@ app.post('/api/export/salary', async (req, res) => {
       const coldRows = await computeHotColdRows(y, m);
       coldRows.forEach(r => { const b = buildBreakdown(r); r.breakdown = b.all; r.breakdown_components = b.components; });
       financeRows = financeRows.concat(coldRows);
+      const allocRowsExport = await computeAllocatedAdjRows(y, m, 'rzpk');
+      financeRows = financeRows.concat(allocRowsExport);
     }
     const rows = financeRows.filter(r => r.total != null);
 
@@ -910,7 +912,7 @@ app.get('/api/salary-adjustments', async (req, res) => {
 });
 
 app.post('/api/salary-adjustments', async (req, res) => {
-    try {
+  try {
     const { employee_id, calc_year, calc_month, type, amount, comment, alloc_dept_code } = req.body;
     const rows = await q(
       `INSERT INTO salary_adjustments (employee_id, calc_year, calc_month, type, amount, comment, alloc_dept_code)
@@ -1093,6 +1095,7 @@ function defaultStatusFor(deptCode, dow, empName) {
     if (dow === 4 || dow === 5) return 'удаленка';   // чт, пт
     return '10-18';                                   // пн, вт, ср
   }
+  if (empName === 'Люлченко Артем' && (dow === 0 || dow === 6)) return 'вих';
   if (deptCode === 'admin' && empName === 'Мединська Ірина')
     return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
@@ -2473,6 +2476,49 @@ async function computeHotColdRows(y, m) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════
+// ДОПЛАТИ ВІД КОМЕРЦІЙНОГО ДИРЕКТОРА — Луїзі/Олександру (адмінка/навчання)
+// за допомогу відділу продажів. Сума йде у фонд alloc_dept_code (напр. rzpk),
+// а не у фонд їхнього фактичного відділу — окремим рядком "Ім'я (допомога)".
+// ═══════════════════════════════════════════════════════════
+async function computeAllocatedAdjRows(y, m, dept) {
+  let adjRows = [];
+  try {
+    adjRows = await q(
+      `SELECT sa.*, e.name AS emp_name
+       FROM salary_adjustments sa
+       JOIN employees e ON e.id = sa.employee_id
+       WHERE sa.calc_year=$1 AND sa.calc_month=$2 AND sa.alloc_dept_code IS NOT NULL`,
+      [y, m]
+    );
+  } catch (e) { adjRows = []; }
+  if (dept) adjRows = adjRows.filter(a => a.alloc_dept_code === dept);
+
+  const byKey = {};
+  adjRows.forEach(a => {
+    const key = `${a.employee_id}_${a.alloc_dept_code}`;
+    byKey[key] = byKey[key] || { employee_id: a.employee_id, emp_name: a.emp_name, alloc_dept_code: a.alloc_dept_code, total: 0, items: [] };
+    byKey[key].total += parseFloat(a.amount) || 0;
+    byKey[key].items.push({ label: a.comment || a.type || 'Доплата', amount: parseFloat(a.amount) || 0 });
+  });
+
+  const deptListRows = await q(`SELECT code, name FROM departments`);
+  const deptNameByCode = {}; deptListRows.forEach(d => { deptNameByCode[d.code] = d.name; });
+
+  return Object.values(byKey).map(v => ({
+    employee_id: v.employee_id,
+    name: `${v.emp_name} (допомога)`,
+    dept_code: v.alloc_dept_code,
+    dept_name: deptNameByCode[v.alloc_dept_code] || v.alloc_dept_code,
+    scheme_type: 'alloc_adj',
+    pay_schedule: 'staff',
+    payout1: 0,
+    payout2: v.total,
+    total: v.total,
+    breakdown: v.items,
+  }));
+}
+
 app.get('/api/hot-cold-income', async (req, res) => {
   try {
     const { employee_id, year, month } = req.query;
@@ -2520,6 +2566,9 @@ app.get('/api/finance', requireFinance, async (req, res) => {
         r.breakdown_components = b.components;
       });
       rows = rows.concat(coldRows);
+      // допомога РЗПК від комерційного директора (Луїза/Олександр) — окремі рядки
+      const allocRows = await computeAllocatedAdjRows(y, m, 'rzpk');
+      rows = rows.concat(allocRows);
     }
     // без обмеження в user.depts — фінанси повні; з обмеженням — тільки дозволені відділи
     if (req.user.depts) {
@@ -2542,15 +2591,15 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     } catch (e) { corrStat = []; }
     const corrByEmp = {};
     corrStat.forEach(c => { corrByEmp[c.employee_id] = c; });
-        // статуси перевірки керівником (жовта галочка)
-        let reviewStat = [];
-        try {
-          reviewStat = await q(`SELECT * FROM payout_review_status WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
-        } catch (e) { reviewStat = []; }
-        const reviewByEmp = {};
-        reviewStat.forEach(p => {
-          (reviewByEmp[p.employee_id] = reviewByEmp[p.employee_id] || {})[p.payout_no] = p;
-        });
+    // статуси перевірки керівником (жовта галочка)
+    let reviewStat = [];
+    try {
+      reviewStat = await q(`SELECT * FROM payout_review_status WHERE calc_year=$1 AND calc_month=$2`, [y, m]);
+    } catch (e) { reviewStat = []; }
+    const reviewByEmp = {};
+    reviewStat.forEach(p => {
+      (reviewByEmp[p.employee_id] = reviewByEmp[p.employee_id] || {})[p.payout_no] = p;
+    });
     // приклеїти статуси виплат + ручні суми (override має пріоритет)
     rows.forEach(r => {
       const ps = payByEmp[r.employee_id] || {};
@@ -2577,6 +2626,10 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       }
       // чи видано корегування окремо в конверті
       r.corr_paid = !!(corrByEmp[r.employee_id] && corrByEmp[r.employee_id].paid);
+      // чи перевірено керівником (жовта галочка) — окремо на 15-те/1-ше
+      const rv = reviewByEmp[r.employee_id] || {};
+      r.reviewed1 = !!(rv[1] && rv[1].reviewed);
+      r.reviewed2 = !!(rv[2] && rv[2].reviewed);
     });
     // агрегати по відділах (лише ті, у кого порахувалось) + скільки ще «на авансі»
     // (виплата 1 вже є, а total ще null — оборот не внесено)
