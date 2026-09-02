@@ -248,17 +248,34 @@ app.get('/api/departments/all', async (_, res) => {
 app.get('/api/employees', async (req, res) => {
   try {
     const { dept, include_month } = req.query;
+    // Дата, відносно якої визначаємо "ефективний" відділ (для людей з
+    // dept_transfer_date — до цієї дати показуємо у СТАРОМУ відділі
+    // (prev_department_id/prev_team), з цієї дати — у поточному).
+    // Без include_month — орієнтуємось на сьогодні (звичайний перегляд).
+    let refEnd;
+    if (include_month) {
+      const [iy0, im0] = include_month.split('-').map(Number);
+      refEnd = new Date(iy0, im0, 0).toISOString().slice(0,10);
+    } else {
+      refEnd = new Date().toISOString().slice(0,10);
+    }
+    const effDeptCode = `(CASE WHEN e.dept_transfer_date IS NOT NULL AND $1 < e.dept_transfer_date THEN pd.code ELSE d.code END)`;
     // fired_date — останній день зі статусом '-' (звільнення)
-    let sql = `SELECT e.*, d.name AS dept_name, d.code AS dept_code,
+    let sql = `SELECT e.*,
+                      ${effDeptCode} AS dept_code,
+                      (CASE WHEN e.dept_transfer_date IS NOT NULL AND $1 < e.dept_transfer_date THEN pd.name ELSE d.name END) AS dept_name,
+                      (CASE WHEN e.dept_transfer_date IS NOT NULL AND $1 < e.dept_transfer_date THEN e.prev_team ELSE e.team END) AS team,
                       (SELECT MAX(se.entry_date) FROM schedule_entries se
                        WHERE se.employee_id = e.id AND se.status = '-') AS fired_date
-               FROM employees e JOIN departments d ON d.id = e.department_id
+               FROM employees e
+               JOIN departments d ON d.id = e.department_id
+               LEFT JOIN departments pd ON pd.id = e.prev_department_id
                WHERE 1=1`;
-    const params = [];
+    const params = [refEnd];
     if (include_month) {
       const [iy, im] = include_month.split('-').map(Number);
       const mStart = `${iy}-${String(im).padStart(2,'0')}-01`;
-      const mEnd = new Date(iy, im, 0).toISOString().slice(0,10);
+      const mEnd = refEnd;
       params.push(mStart, mEnd);
       sql += ` AND (e.is_active = true OR EXISTS (
         SELECT 1 FROM schedule_entries se2
@@ -268,6 +285,7 @@ app.get('/api/employees', async (req, res) => {
     } else {
       sql += ` AND e.is_active = true`;
     }
+    if (dept) { sql += ` AND ${effDeptCode} = $${params.length+1}`; params.push(dept); }
     if (dept) { sql += ` AND d.code = $${params.length+1}`; params.push(dept); }
     sql += ' ORDER BY d.id, COALESCE(e.sort_order, 999999), e.name';
     res.json(await q(sql, params));
@@ -1987,11 +2005,16 @@ async function computeFinanceRows(y, m, dept) {
     const end   = new Date(y, m, 0).toISOString().slice(0,10);
 
     // всі активні співробітники зі схемою fixed_rate
+    const effDeptCode2 = `(CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.code ELSE d.code END)`;
     let empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date,
-                         d.id AS dept_id, d.code AS dept_code, d.name AS dept_name,
+                         (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.id ELSE d.id END) AS dept_id,
+                         ${effDeptCode2} AS dept_code,
+                         (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.name ELSE d.name END) AS dept_name,
+                         (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN e.prev_team ELSE e.team END) AS team,
                          s.scheme_type, s.base_rate, s.norm_days, s.norm_type, s.fixed_amount
                   FROM employees e
                   JOIN departments d ON d.id = e.department_id
+                  LEFT JOIN departments pd ON pd.id = e.prev_department_id
                   LEFT JOIN salary_schemes s ON s.employee_id = e.id
                   WHERE (e.start_date IS NULL OR e.start_date <= $2)
                     AND (e.is_active = true OR EXISTS (
@@ -2000,7 +2023,7 @@ async function computeFinanceRows(y, m, dept) {
                   AND se2.status IS NOT NULL AND se2.status NOT IN ('', '-', 'звіл.', 'звіл')
               ))`;
     const params = [start, end];
-    if (dept) { empSql += ` AND d.code = $${params.length + 1}`; params.push(dept); }
+    if (dept) { empSql += ` AND ${effDeptCode2} = $${params.length + 1}`; params.push(dept); }
     empSql += ` ORDER BY d.id, e.name`;
     const emps = await q(empSql, params);
 
