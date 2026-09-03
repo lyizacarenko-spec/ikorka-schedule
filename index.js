@@ -1250,7 +1250,10 @@ function computeSalesSalary(salRow, isOrder, opts) {
   // 31 числа факт/план невідомі (повернення докапують). Показуємо ЛИШЕ виплату 1 (аванс).
   // Виплата 2 і total поки невизначені (null) — з'являться коли введуть оборот.
   if (!fact) {
-    const advance = isFirst ? newAdvance() : (isOrder ? ORDER_ADVANCE : SALES_ADVANCE);
+    // якщо реальних відпрацьованих днів немає (0 змін — напр. звільнений
+    // весь місяць, або графік ще не заповнений) — авансу не належить,
+    // фіксована сума 7000/5000 видається лише тим, хто справді працює
+    const advance = workedGraph <= 0 ? 0 : (isFirst ? newAdvance() : (isOrder ? ORDER_ADVANCE : SALES_ADVANCE));
     return {
       scheme_type: isOrder ? 'orders_count' : 'percent_plan',
       advance_stage: true,
@@ -2011,7 +2014,9 @@ async function computeFinanceRows(y, m, dept) {
                          ${effDeptCode2} AS dept_code,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.name ELSE d.name END) AS dept_name,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN e.prev_team ELSE e.team END) AS team,
-                         s.scheme_type, s.base_rate, s.norm_days, s.norm_type, s.fixed_amount
+                         s.scheme_type,
+                         (CASE WHEN s.rate_change_date IS NOT NULL AND $2 < s.rate_change_date THEN s.prev_base_rate ELSE s.base_rate END) AS base_rate,
+                         s.norm_days, s.norm_type, s.fixed_amount
                   FROM employees e
                   JOIN departments d ON d.id = e.department_id
                   LEFT JOIN departments pd ON pd.id = e.prev_department_id
