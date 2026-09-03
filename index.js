@@ -2487,6 +2487,8 @@ async function computeHotColdRows(y, m) {
     const coldSum = inc ? parseFloat(inc.cold_sum) || 0 : 0;
     const pct = inc ? parseFloat(inc.pct) || 0 : 0.2;
     const amount = Math.round(coldSum * pct) / 100;
+    const override1 = inc && inc.override1 != null ? parseFloat(inc.override1) : null;
+    const override2 = inc && inc.override2 != null ? parseFloat(inc.override2) : null;
     return {
       employee_id: emp.id,
       name: `${emp.name} (холодка)`,
@@ -2500,6 +2502,13 @@ async function computeHotColdRows(y, m) {
       payout2: inc ? amount : null,
       total: inc ? amount : null,
       note: inc ? null : 'холодка не внесена',
+      // окремий статус виплати холодки — НЕ спільний з основною ЗП (payout_status),
+      // щоб override гарячої ЗП більше не "протікав" у рядок холодки того самого employee_id
+      paid1: !!(inc && inc.paid1), paid2: !!(inc && inc.paid2),
+      reviewed1: !!(inc && inc.reviewed1), reviewed2: !!(inc && inc.reviewed2),
+      override1, override2,
+      pay1: override1, pay2: override2 != null ? override2 : (inc ? amount : null),
+      is_cold_row: true,
     };
   });
 }
@@ -2575,6 +2584,51 @@ app.post('/api/hot-cold-income', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ═══════════════════════════════════════════════════════════
+// СТАТУС ВИПЛАТИ "ХОЛОДКИ" — окремо від payout_status основної ЗП, щоб
+// override гарячої ЗП не змішувався з холодкою того самого employee_id.
+// ═══════════════════════════════════════════════════════════
+app.put('/api/hot-cold-payout-status', requireFinance, async (req, res) => {
+  try {
+    const { employee_id, calc_year, calc_month, payout_no, paid, amount_override, reviewed } = req.body;
+    const overrideProvided = Object.prototype.hasOwnProperty.call(req.body, 'amount_override');
+    const paidProvided = Object.prototype.hasOwnProperty.call(req.body, 'paid');
+    const reviewedProvided = Object.prototype.hasOwnProperty.call(req.body, 'reviewed');
+    const overrideVal = (amount_override === '' || amount_override == null) ? null : amount_override;
+
+    // забезпечити наявність базового рядка (cold_sum=0 за замовчуванням)
+    await q(
+      `INSERT INTO hot_cold_income (employee_id, calc_year, calc_month, cold_sum, pct, updated_at)
+       VALUES ($1,$2,$3,0,0.2,NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month) DO NOTHING`,
+      [employee_id, calc_year, calc_month]
+    );
+
+    const paidCol = payout_no === 1 ? 'paid1' : 'paid2';
+    const overrideCol = payout_no === 1 ? 'override1' : 'override2';
+    const paidAtCol = payout_no === 1 ? 'paid1_at' : 'paid2_at';
+    const reviewedCol = payout_no === 1 ? 'reviewed1' : 'reviewed2';
+
+    const sets = [];
+    const params = [];
+    if (paidProvided) {
+      params.push(paid === true); sets.push(`${paidCol}=$${params.length}`);
+      params.push(paid === true ? new Date() : null); sets.push(`${paidAtCol}=$${params.length}`);
+    }
+    if (overrideProvided) { params.push(overrideVal); sets.push(`${overrideCol}=$${params.length}`); }
+    if (reviewedProvided) { params.push(reviewed === true); sets.push(`${reviewedCol}=$${params.length}`); }
+    if (!sets.length) return res.json({ ok: true });
+    params.push(employee_id, calc_year, calc_month);
+    const rows = await q(
+      `UPDATE hot_cold_income SET ${sets.join(', ')}, updated_at=NOW()
+       WHERE employee_id=$${params.length-2} AND calc_year=$${params.length-1} AND calc_month=$${params.length}
+       RETURNING *`,
+      params
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/finance', requireFinance, async (req, res) => {
   try {
     const { year, month, dept } = req.query;
@@ -2630,6 +2684,14 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     });
     // приклеїти статуси виплат + ручні суми (override має пріоритет)
     rows.forEach(r => {
+      // рядки "холодки" вже мають власний, окремий статус виплат
+      // (paid1/paid2/override1/override2), приклеєний у computeHotColdRows —
+      // НЕ чіпаємо їх тут, інакше override основної ЗП employee_id "протече"
+      // в рядок холодки того самого співробітника (був такий баг раніше)
+      if (r.is_cold_row) {
+        r.corr_paid = !!(corrByEmp[r.employee_id] && corrByEmp[r.employee_id].paid);
+        return;
+      }
       const ps = payByEmp[r.employee_id] || {};
       const p1 = ps[1], p2 = ps[2];
       r.paid1 = !!(p1 && p1.paid);
