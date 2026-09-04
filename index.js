@@ -2016,7 +2016,9 @@ async function computeFinanceRows(y, m, dept) {
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN e.prev_team ELSE e.team END) AS team,
                          s.scheme_type,
                          (CASE WHEN s.rate_change_date IS NOT NULL AND $2 < s.rate_change_date THEN s.prev_base_rate ELSE s.base_rate END) AS base_rate,
-                         s.norm_days, s.norm_type, s.fixed_amount
+                         s.norm_days, s.norm_type, s.fixed_amount,
+                         (SELECT MAX(se3.entry_date) FROM schedule_entries se3
+                          WHERE se3.employee_id = e.id AND se3.status = '-') AS fired_date
                   FROM employees e
                   JOIN departments d ON d.id = e.department_id
                   LEFT JOIN departments pd ON pd.id = e.prev_department_id
@@ -2030,7 +2032,16 @@ async function computeFinanceRows(y, m, dept) {
     const params = [start, end];
     if (dept) { empSql += ` AND ${effDeptCode2} = $${params.length + 1}`; params.push(dept); }
     empSql += ` ORDER BY d.id, e.name`;
-    const emps = await q(empSql, params);
+    let emps = await q(empSql, params);
+    // звільнений (fired_date) — видимий у Фінансах до місяця звільнення
+    // ВКЛЮЧНО, з наступного місяця приховується (навіть якщо is_active
+    // ще не переключили на false — та сама логіка, що й у графіку)
+    const curYm = `${y}-${String(m).padStart(2,'0')}`;
+    emps = emps.filter(emp => {
+      if (!emp.fired_date) return true;
+      const firedYm = String(emp.fired_date).slice(0, 7);
+      return firedYm >= curYm;
+    });
 
     // графік за місяць
     const sched = await q(
