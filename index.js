@@ -21,6 +21,199 @@ const SALES_DEPTS = ['rzpk','retail','wholesale','resellers','hot'];
 // Реактивація/Відмови — ЗП по кількості замовлень
 const ORDER_DEPTS = ['refuse','reactivation'];
 
+// ── Нові формули ЗП РЗПК (роздріб/малий опт/ресейл) — чинні з вересня 2026,
+// повністю замінюють старі percent_plan/рол-based формули для ВСЬОГО
+// відділу rzpk. Місяці ДО цієї дати рахуються за старими формулами
+// (як і раніше — жодних змін заднім числом).
+const RZPK_NEW_SCHEMES_CUTOVER_YM = '2026-09';
+
+// ═══════════════════════════════════════════════════════════
+// РЗПК РОЗДРІБ — менеджер (заміна percent_plan з вересня 2026)
+// Оклад 20000 (пропорційно дням) + бонус за показники (до 6000) +
+// бонус за виконання плану (4000-10000) - штраф за повернення понад 6%.
+// ═══════════════════════════════════════════════════════════
+function computeRetailV2Salary(salRow, workedGraph) {
+  const s = salRow || {};
+  const targetDays = 22;
+  const worked = workedGraph != null ? workedGraph : (parseInt(s.worked_days) || 0);
+  const base = worked >= targetDays ? 20000 : Math.round(20000 * worked / targetDays);
+
+  const avgCheckOk = !!s.avg_check_ok;
+  const callsOk = !!s.calls_ok;
+  const approvalOk = !!s.approval_ok;
+  const bonus1 = (avgCheckOk ? 2000 : 0) + (callsOk ? 2000 : 0) + (approvalOk ? 2000 : 0);
+
+  const plan = parseFloat(s.plan_amount) || 0;
+  const fact = parseFloat(s.fact_amount) || 0;
+  const pct = plan > 0 ? (fact / plan * 100) : 0;
+
+  let bonus2 = 0;
+  if (pct >= 121) bonus2 = 10000;
+  else if (pct >= 110) bonus2 = 5000;
+  else if (pct >= 100) bonus2 = 5000;
+  else if (pct >= 90) bonus2 = 4000;
+  else if (pct >= 80) bonus2 = 4000;
+
+  const returnsPct = parseFloat(s.returns_pct) || 0;
+  const retExcess = Math.max(0, returnsPct - 6);
+  const overage = fact * retExcess / 100;
+  const returnPenalty = Math.round(overage * 0.015 * 100) / 100;
+
+  const bonusManual = parseFloat(s.bonus_manual) || 0;
+  const manualPenalty = parseFloat(s.penalty) || 0;
+
+  const total = base + bonus1 + bonus2 - returnPenalty - manualPenalty + bonusManual;
+
+  let payout1 = 10000;
+  if (payout1 > total) payout1 = Math.max(0, total);
+  const payout2 = Math.max(0, total - payout1);
+
+  return {
+    scheme_type: 'retail_v2', base_rate: base, worked_days: worked, target_days: targetDays,
+    avg_check_ok: avgCheckOk, calls_ok: callsOk, approval_ok: approvalOk, bonus1,
+    plan, fact, pct: Math.round(pct * 10) / 10, bonus2,
+    returns_pct: returnsPct, return_penalty: returnPenalty,
+    bonus_manual: bonusManual, penalty: manualPenalty,
+    total, payout1, payout2, pay_schedule: 'sales',
+    advance: payout1, remainder: payout2,
+  };
+}
+
+// ── Тімлід роздрібу (з вересня 2026) ──
+function computeTeamleadRetailSalary(row, workedGraph) {
+  const r = row || {};
+  const worked = workedGraph != null ? workedGraph : 22;
+  const base = worked >= 22 ? 30000 : Math.round(30000 * worked / 22);
+  const planTarget = parseFloat(r.plan_target) || 0;
+  const planFact = parseFloat(r.plan_fact) || 0;
+  const pct = planTarget > 0 ? (planFact / planTarget * 100) : 0;
+  let rate = 0;
+  if (pct >= 105) rate = 0.25;
+  else if (pct >= 90) rate = 0.20;
+  else if (pct >= 80) rate = 0.10;
+  const bonus = planFact * rate / 100;
+  const bonusManual = parseFloat(r.bonus_manual) || 0;
+  const penalty = parseFloat(r.penalty) || 0;
+  const total = base + bonus + bonusManual - penalty;
+  let payout1 = Math.round(base / 2);
+  if (payout1 > total) payout1 = Math.max(0, total);
+  const payout2 = Math.max(0, total - payout1);
+  return {
+    scheme_type: 'teamlead_retail', base_rate: base, worked_days: worked,
+    plan_target: planTarget, plan_fact: planFact, plan_pct: Math.round(pct * 10) / 10,
+    bonus_rate: rate, bonus, bonus_manual: bonusManual, penalty,
+    total, payout1, payout2, pay_schedule: 'sales', advance: payout1, remainder: payout2,
+  };
+}
+
+// ── Тімлід малого опту і реселерів (з вересня 2026) ──
+function computeTeamleadMoSalary(row, workedGraph) {
+  const r = row || {};
+  const worked = workedGraph != null ? workedGraph : 22;
+  const base = worked >= 22 ? 35000 : Math.round(35000 * worked / 22);
+  const cnt = parseInt(r.returned_clients) || 0;
+  let bonus = 0;
+  if (cnt >= 35) bonus = 12500;
+  else if (cnt >= 30) bonus = 10000;
+  else if (cnt >= 25) bonus = 7500;
+  else if (cnt >= 20) bonus = 5000;
+  else if (cnt >= 15) bonus = 3000;
+  const bonusManual = parseFloat(r.bonus_manual) || 0;
+  const penalty = parseFloat(r.penalty) || 0;
+  const total = base + bonus + bonusManual - penalty;
+  let payout1 = Math.round(base / 2);
+  if (payout1 > total) payout1 = Math.max(0, total);
+  const payout2 = Math.max(0, total - payout1);
+  return {
+    scheme_type: 'teamlead_mo', base_rate: base, worked_days: worked,
+    returned_clients: cnt, bonus, bonus_manual: bonusManual, penalty,
+    total, payout1, payout2, pay_schedule: 'sales', advance: payout1, remainder: payout2,
+  };
+}
+
+// ── Менеджер "Малий опт" (з вересня 2026) ──
+function computeMoManagerSalary(row, workedGraph) {
+  const r = row || {};
+  const worked = workedGraph != null ? workedGraph : 22;
+  const base = worked >= 22 ? 25000 : Math.round(25000 * worked / 22);
+  const marginAmt = parseFloat(r.margin_amount) || 0;
+  const marginPct = parseFloat(r.margin_pct) || 0;
+  const disciplineOk = r.discipline_ok !== false;
+  const gateMargin = marginPct >= 50;
+  let marginBonusPct = 0;
+  if (marginPct >= 65) marginBonusPct = 11;
+  else if (marginPct >= 60) marginBonusPct = 8.5;
+  else if (marginPct >= 50) marginBonusPct = 6.5;
+  const marginBonus = (gateMargin && disciplineOk) ? marginAmt * marginBonusPct / 100 : 0;
+
+  const newClients = parseInt(r.new_clients_count) || 0;
+  let perClient = 0;
+  if (newClients >= 6) perClient = 900;
+  else if (newClients >= 3) perClient = 700;
+  else if (newClients >= 1) perClient = 500;
+  const clientBonus = (gateMargin && disciplineOk) ? newClients * perClient : 0;
+
+  const bonusManual = parseFloat(r.bonus_manual) || 0;
+  const penalty = parseFloat(r.penalty) || 0;
+  const total = base + marginBonus + clientBonus + bonusManual - penalty;
+  let payout1 = Math.round(base / 2);
+  if (payout1 > total) payout1 = Math.max(0, total);
+  const payout2 = Math.max(0, total - payout1);
+  return {
+    scheme_type: 'mo_manager', base_rate: base, worked_days: worked,
+    margin_amount: marginAmt, margin_pct: marginPct, margin_bonus_pct: marginBonusPct, margin_bonus: marginBonus,
+    gate_margin: gateMargin, discipline_ok: disciplineOk,
+    new_clients_count: newClients, per_client: perClient, client_bonus: clientBonus,
+    bonus_manual: bonusManual, penalty, total, payout1, payout2,
+    pay_schedule: 'sales', advance: payout1, remainder: payout2,
+  };
+}
+
+// ── Менеджер "B2B / Реселери" (з вересня 2026) ──
+function computeB2bManagerSalary(row, workedGraph) {
+  const r = row || {};
+  const worked = workedGraph != null ? workedGraph : 22;
+  const base = worked >= 22 ? 25000 : Math.round(25000 * worked / 22);
+  const marginAmt = parseFloat(r.margin_amount) || 0;
+  const marginPct = parseFloat(r.margin_pct) || 0;
+  const disciplineOk = r.discipline_ok !== false;
+  const gateMargin = marginPct >= 35;
+  let marginBonusPct = 0;
+  if (marginPct >= 55) marginBonusPct = 12;
+  else if (marginPct >= 45) marginBonusPct = 9;
+  else if (marginPct >= 35) marginBonusPct = 6;
+  const marginBonus = (gateMargin && disciplineOk) ? marginAmt * marginBonusPct / 100 : 0;
+
+  const turnover = parseFloat(r.reseller_turnover) || 0;
+  let turnoverBonus = 0;
+  if (turnover >= 1000000) turnoverBonus = 12000;
+  else if (turnover >= 300000) turnoverBonus = 6000;
+  turnoverBonus = (gateMargin && disciplineOk) ? turnoverBonus : 0;
+
+  const newRes = parseInt(r.new_resellers_count) || 0;
+  let perRes = 0;
+  if (newRes >= 6) perRes = 3600;
+  else if (newRes >= 3) perRes = 2800;
+  else if (newRes >= 1) perRes = 2000;
+  const resBonus = (gateMargin && disciplineOk) ? newRes * perRes : 0;
+
+  const bonusManual = parseFloat(r.bonus_manual) || 0;
+  const penalty = parseFloat(r.penalty) || 0;
+  const total = base + marginBonus + turnoverBonus + resBonus + bonusManual - penalty;
+  let payout1 = Math.round(base / 2);
+  if (payout1 > total) payout1 = Math.max(0, total);
+  const payout2 = Math.max(0, total - payout1);
+  return {
+    scheme_type: 'b2b_manager', base_rate: base, worked_days: worked,
+    margin_amount: marginAmt, margin_pct: marginPct, margin_bonus_pct: marginBonusPct, margin_bonus: marginBonus,
+    gate_margin: gateMargin, discipline_ok: disciplineOk,
+    reseller_turnover: turnover, turnover_bonus: turnoverBonus,
+    new_resellers_count: newRes, per_reseller: perRes, reseller_bonus: resBonus,
+    bonus_manual: bonusManual, penalty, total, payout1, payout2,
+    pay_schedule: 'sales', advance: payout1, remainder: payout2,
+  };
+}
+
 // ── Константи виплат ─────────────────────────────────────────
 const NEW_DAY_BASE      = 15000;  // базова ставка новачка (продажі і відмови) для розрахунку авансу: ставка дня = 15000/22
 const SALES_ADVANCE     = 7000;   // фікс аванс продажів для «старих» (виплата 1)
@@ -633,7 +826,7 @@ app.get('/api/salary', async (req, res) => {
 
 app.put('/api/salary', requireAuth, async (req, res) => {
   try {
-    const { employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual } = req.body;
+    const { employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual, avg_check_ok, calls_ok, approval_ok } = req.body;
     // перевірка прав: ЗП можна вводити лише своїм відділам
     if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
     const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
@@ -642,12 +835,121 @@ app.put('/api/salary', requireAuth, async (req, res) => {
     if (req.user.only_employee_id && req.user.only_employee_id !== parseInt(employee_id))
       return res.status(403).json({ error: 'Немає доступу до цього співробітника' });
     const rows = await q(
-      `INSERT INTO salary_calc (employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual, updated_at)
+      `INSERT INTO salary_calc (employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual, avg_check_ok, calls_ok, approval_ok, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month)
+       DO UPDATE SET plan_amount=$4, fact_amount=$5, returns_pct=$6, worked_days=$7, senior_bonus=$8, penalty=$9, note=$10, bonus_manual=$11, avg_check_ok=$12, calls_ok=$13, approval_ok=$14, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct||0, worked_days||0, senior_bonus||0, penalty||0, note||null, bonus_manual||0,
+       avg_check_ok===true, calls_ok===true, approval_ok===true]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════
+// НОВІ ФОРМУЛИ РЗПК (з вересня 2026): тімлід роздрібу, тімлід МО/ресейл,
+// менеджер МО, менеджер B2B/реселери — ручне введення показників
+// ═══════════════════════════════════════════════════════════
+app.get('/api/teamlead-retail-salary', async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM teamlead_retail_salary WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (req.query.employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(req.query.employee_id)); }
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put('/api/teamlead-retail-salary', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const { employee_id, calc_year, calc_month, plan_target, plan_fact, bonus_manual, penalty, note } = req.body;
+    const rows = await q(
+      `INSERT INTO teamlead_retail_salary (employee_id, calc_year, calc_month, plan_target, plan_fact, bonus_manual, penalty, note, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month)
+       DO UPDATE SET plan_target=$4, plan_fact=$5, bonus_manual=$6, penalty=$7, note=$8, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, plan_target||0, plan_fact||0, bonus_manual||0, penalty||0, note||null]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/teamlead-mo-salary', async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM teamlead_mo_salary WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (req.query.employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(req.query.employee_id)); }
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put('/api/teamlead-mo-salary', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const { employee_id, calc_year, calc_month, returned_clients, bonus_manual, penalty, note } = req.body;
+    const rows = await q(
+      `INSERT INTO teamlead_mo_salary (employee_id, calc_year, calc_month, returned_clients, bonus_manual, penalty, note, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month)
+       DO UPDATE SET returned_clients=$4, bonus_manual=$5, penalty=$6, note=$7, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, returned_clients||0, bonus_manual||0, penalty||0, note||null]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/mo-manager-salary', async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM mo_manager_salary WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (req.query.employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(req.query.employee_id)); }
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put('/api/mo-manager-salary', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const { employee_id, calc_year, calc_month, margin_amount, margin_pct, new_clients_count, discipline_ok, bonus_manual, penalty, note } = req.body;
+    const rows = await q(
+      `INSERT INTO mo_manager_salary (employee_id, calc_year, calc_month, margin_amount, margin_pct, new_clients_count, discipline_ok, bonus_manual, penalty, note, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+       ON CONFLICT (employee_id, calc_year, calc_month)
+       DO UPDATE SET margin_amount=$4, margin_pct=$5, new_clients_count=$6, discipline_ok=$7, bonus_manual=$8, penalty=$9, note=$10, updated_at=NOW()
+       RETURNING *`,
+      [employee_id, calc_year, calc_month, margin_amount||0, margin_pct||0, new_clients_count||0, discipline_ok!==false, bonus_manual||0, penalty||0, note||null]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/b2b-manager-salary', async (req, res) => {
+  try {
+    const y = parseInt(req.query.year || new Date().getFullYear());
+    const m = parseInt(req.query.month || new Date().getMonth() + 1);
+    let sql = `SELECT * FROM b2b_manager_salary WHERE calc_year=$1 AND calc_month=$2`;
+    const params = [y, m];
+    if (req.query.employee_id) { sql += ` AND employee_id=$3`; params.push(parseInt(req.query.employee_id)); }
+    res.json(await q(sql, params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put('/api/b2b-manager-salary', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const { employee_id, calc_year, calc_month, margin_amount, margin_pct, reseller_turnover, new_resellers_count, discipline_ok, bonus_manual, penalty, note } = req.body;
+    const rows = await q(
+      `INSERT INTO b2b_manager_salary (employee_id, calc_year, calc_month, margin_amount, margin_pct, reseller_turnover, new_resellers_count, discipline_ok, bonus_manual, penalty, note, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
        ON CONFLICT (employee_id, calc_year, calc_month)
-       DO UPDATE SET plan_amount=$4, fact_amount=$5, returns_pct=$6, worked_days=$7, senior_bonus=$8, penalty=$9, note=$10, bonus_manual=$11, updated_at=NOW()
+       DO UPDATE SET margin_amount=$4, margin_pct=$5, reseller_turnover=$6, new_resellers_count=$7, discipline_ok=$8, bonus_manual=$9, penalty=$10, note=$11, updated_at=NOW()
        RETURNING *`,
-      [employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct||0, worked_days||0, senior_bonus||0, penalty||0, note||null, bonus_manual||0]
+      [employee_id, calc_year, calc_month, margin_amount||0, margin_pct||0, reseller_turnover||0, new_resellers_count||0, discipline_ok!==false, bonus_manual||0, penalty||0, note||null]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1662,6 +1964,43 @@ function buildBreakdown(r) {
     case 'hot_cold':
       push(`Холодка ${r.cold_pct}% від ${r.cold_sum}`, r.total);
       break;
+    case 'retail_v2':
+      push('Оклад', r.base_rate);
+      push('Середній чек', r.avg_check_ok ? 2000 : 0);
+      push('К-сть дзвінків', r.calls_ok ? 2000 : 0);
+      push('Аппрув', r.approval_ok ? 2000 : 0);
+      push(`Бонус за план (${r.pct}%)`, r.bonus2);
+      push('Штраф за повернення', r.return_penalty ? -r.return_penalty : 0);
+      push('Доплата', r.bonus_manual);
+      push('Штраф', r.penalty ? -r.penalty : 0);
+      break;
+    case 'teamlead_retail':
+      push('Ставка', r.base_rate);
+      push(`Бонус за план відділу (${r.bonus_rate}%)`, r.bonus);
+      push('Доплата', r.bonus_manual);
+      push('Штраф', r.penalty ? -r.penalty : 0);
+      break;
+    case 'teamlead_mo':
+      push('Ставка', r.base_rate);
+      push(`Бонус за повернутих клієнтів (${r.returned_clients})`, r.bonus);
+      push('Доплата', r.bonus_manual);
+      push('Штраф', r.penalty ? -r.penalty : 0);
+      break;
+    case 'mo_manager':
+      push('Оклад', r.base_rate);
+      push(`Доплата за маржу (${r.margin_bonus_pct}%)`, r.margin_bonus);
+      push(`Доплата за нових клієнтів (${r.new_clients_count})`, r.client_bonus);
+      push('Доплата', r.bonus_manual);
+      push('Штраф', r.penalty ? -r.penalty : 0);
+      break;
+    case 'b2b_manager':
+      push('Оклад', r.base_rate);
+      push(`Доплата за маржу (${r.margin_bonus_pct}%)`, r.margin_bonus);
+      push('Доплата за оборот з реселерами', r.turnover_bonus);
+      push(`Доплата за нових реселерів (${r.new_resellers_count})`, r.reseller_bonus);
+      push('Доплата', r.bonus_manual);
+      push('Штраф', r.penalty ? -r.penalty : 0);
+      break;
     default:
       break;
   }
@@ -2112,6 +2451,33 @@ async function computeFinanceRows(y, m, dept) {
     catch (e) { recruiterRows = []; }
     const recruiterByEmp = {};
     recruiterRows.forEach(r => { recruiterByEmp[r.employee_id] = r; });
+
+    // Нові формули РЗПК (з вересня 2026): тімлід роздрібу, тімлід МО/ресейл,
+    // менеджер МО, менеджер B2B/реселери
+    let teamleadRetailRows = [];
+    try { teamleadRetailRows = await q(`SELECT * FROM teamlead_retail_salary WHERE calc_year=$1 AND calc_month=$2`, [y, m]); }
+    catch (e) { teamleadRetailRows = []; }
+    const teamleadRetailByEmp = {};
+    teamleadRetailRows.forEach(r => { teamleadRetailByEmp[r.employee_id] = r; });
+
+    let teamleadMoRows = [];
+    try { teamleadMoRows = await q(`SELECT * FROM teamlead_mo_salary WHERE calc_year=$1 AND calc_month=$2`, [y, m]); }
+    catch (e) { teamleadMoRows = []; }
+    const teamleadMoByEmp = {};
+    teamleadMoRows.forEach(r => { teamleadMoByEmp[r.employee_id] = r; });
+
+    let moManagerRows = [];
+    try { moManagerRows = await q(`SELECT * FROM mo_manager_salary WHERE calc_year=$1 AND calc_month=$2`, [y, m]); }
+    catch (e) { moManagerRows = []; }
+    const moManagerByEmp = {};
+    moManagerRows.forEach(r => { moManagerByEmp[r.employee_id] = r; });
+
+    let b2bManagerRows = [];
+    try { b2bManagerRows = await q(`SELECT * FROM b2b_manager_salary WHERE calc_year=$1 AND calc_month=$2`, [y, m]); }
+    catch (e) { b2bManagerRows = []; }
+    const b2bManagerByEmp = {};
+    b2bManagerRows.forEach(r => { b2bManagerByEmp[r.employee_id] = r; });
+    const useRzpkNewSchemes = curYm >= RZPK_NEW_SCHEMES_CUTOVER_YM;
     // гарячі продажі — суми по періодах
     let perRows = [];
     try {
@@ -2258,6 +2624,37 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         };
       }
       // продажі / відмови: рахуємо із збереженого salary_calc
+      // РЗПК з вересня 2026 — нові формули (роздріб/МО/ресейл), замість
+      // старого percent_plan; місяці до вересня рахуються по-старому нижче
+      if (useRzpkNewSchemes && emp.dept_code === 'rzpk') {
+        const { worked: workedGraphNew } = countWorkAndTrain(schedByEmp[emp.id] || []);
+        const adjList = adjByEmp[emp.id] || [];
+        const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        let calc = null;
+        if (emp.team === 'Роздріб' && emp.role === 'teamlead') {
+          calc = computeTeamleadRetailSalary(teamleadRetailByEmp[emp.id], workedGraphNew);
+        } else if ((emp.team === 'Малий опт' || emp.team === 'Ресейл') && emp.role === 'teamlead') {
+          calc = computeTeamleadMoSalary(teamleadMoByEmp[emp.id], workedGraphNew);
+        } else if (emp.team === 'Малий опт' && !['rop','head','teamlead'].includes(emp.role)) {
+          calc = computeMoManagerSalary(moManagerByEmp[emp.id], workedGraphNew);
+        } else if (emp.team === 'Ресейл' && !['rop','head','teamlead'].includes(emp.role)) {
+          calc = computeB2bManagerSalary(b2bManagerByEmp[emp.id], workedGraphNew);
+        } else if (emp.team === 'Роздріб' && !['rop','head','teamlead'].includes(emp.role)) {
+          calc = computeRetailV2Salary(salByEmp[emp.id], workedGraphNew);
+        }
+        if (calc) {
+          calc.total += adjTotal;
+          calc.payout2 = Math.max(0, calc.payout2 + adjTotal);
+          return {
+            employee_id: emp.id, name: emp.name,
+            dept_code: emp.dept_code, dept_name: emp.dept_name,
+            role: emp.role, level: emp.level,
+            adj_total: adjTotal, adjustments: adjList,
+            ...calc,
+          };
+        }
+        // немає team (напр. РОП відділу rzpk загалом) — падає у стару логіку нижче
+      }
       if (SALES_DEPTS.includes(emp.dept_code) || ORDER_DEPTS.includes(emp.dept_code)) {
         if (['rop','head','teamlead'].includes(emp.role)) {
           // РОП відділів продажів — своя мотивація
