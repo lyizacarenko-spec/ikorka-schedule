@@ -2085,7 +2085,19 @@ app.put('/api/payout-status', requireFinance, async (req, res) => {
           // фасовку (вона рахується й виплачується окремо щотижня в "Склад по
           // тижнях"), тож звірка з total завжди хибно показувала б недоплату
           // рівно на суму фасовки.
-          const shouldHavePaid = (empRow.payout1 || 0) + (empRow.payout2 || 0);
+          // Якщо корегування цього місяця вже видані готівкою окремо ("видано в
+          // конверті", correction_payout_status.paid=true) — вони НЕ повинні йти
+          // ще й через payout1/payout2. Бухгалтер у такому разі свідомо зменшує
+          // payout2 (override) рівно на суму корегування, щоб не платити двічі.
+          // Без цієї перевірки те законне зменшення сприймалось як недоплата і
+          // автоматично дублювалось корегуванням на наступний місяць.
+          const corrRows = await q(
+            `SELECT paid FROM correction_payout_status WHERE employee_id=$1 AND calc_year=$2 AND calc_month=$3`,
+            [employee_id, calc_year, calc_month]
+          );
+          const corrPaidInCash = !!(corrRows[0] && corrRows[0].paid);
+          const adjAlreadyCovered = corrPaidInCash ? (parseFloat(empRow.adj_total) || 0) : 0;
+          const shouldHavePaid = (empRow.payout1 || 0) + (empRow.payout2 || 0) - adjAlreadyCovered;
           const shortfall = Math.round((shouldHavePaid - paidActual) * 100) / 100;
           if (shortfall > 1) {
             let ny = parseInt(calc_year), nm = parseInt(calc_month) + 1;
@@ -2656,7 +2668,13 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         // немає team (напр. РОП відділу rzpk загалом) — падає у стару логіку нижче
       }
       if (SALES_DEPTS.includes(emp.dept_code) || ORDER_DEPTS.includes(emp.dept_code)) {
-        if (['rop','head','teamlead'].includes(emp.role)) {
+        // Тімлід РЗПК ДО місяця переходу на нові формули (curYm < RZPK_NEW_SCHEMES_CUTOVER_YM)
+        // ще не має власної формули тімліда — до того моменту він рахується як
+        // звичайний менеджер за percent_plan (тією ж формулою, що й до призначення
+        // тімлідом). "Керівна роль" (без розрахунку) застосовується лише З місяця
+        // переходу, коли вже підключається computeTeamleadRetailSalary/MoSalary.
+        const isPreCutoverRzpkTeamlead = emp.role === 'teamlead' && emp.dept_code === 'rzpk' && !useRzpkNewSchemes;
+        if (['rop','head','teamlead'].includes(emp.role) && !isPreCutoverRzpkTeamlead) {
           // РОП відділів продажів — своя мотивація
           if (emp.role === 'rop' && ROP_CFG[emp.dept_code]) {
             const rc = computeRopSalary(emp.dept_code, ropByEmp[emp.id]);
