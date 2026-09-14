@@ -1677,9 +1677,10 @@ function mentorIeBonus(ie) {
   return 0;
 }
 
-function computeRopSalary(deptCode, row) {
+function computeRopSalary(deptCode, row, customRate) {
   const C = ROP_CFG[deptCode];
   if (!C) return null;
+  const rate = (customRate != null && parseFloat(customRate) > 0) ? parseFloat(customRate) : C.rate;
   const r = row || {};
   const planTarget = parseFloat(r.plan_target) || 0;
   const planFact   = parseFloat(r.plan_fact)   || 0;
@@ -1695,7 +1696,7 @@ function computeRopSalary(deptCode, row) {
   let payPlan = 0;
   if (C.mode === 'scale') {
     // гаряча: бонус лише якщо ОБИДВА KPI виконані і є перевиконання
-    if (srchOk && aprOk && pct > 100) payPlan = C.rate * ropHotOverPct(pct - 100) / 100;
+    if (srchOk && aprOk && pct > 100) payPlan = rate * ropHotOverPct(pct - 100) / 100;
   } else {
     // РЗПК / відмови: пропорційно, від 80%
     if (pct >= 80) payPlan = C.plan_bonus * pct / 100;
@@ -1711,11 +1712,11 @@ let payOwn = 0;
 
   const bonus = parseFloat(r.bonus) || 0;
   const penalty = parseFloat(r.penalty) || 0;
-  const total = C.rate + payKpi + payPlan + payOwn + bonus - penalty;
+  const total = rate + payKpi + payPlan + payOwn + bonus - penalty;
 
   return {
     scheme_type: 'rop', dept_code: deptCode,
-    rate: C.rate, plan_target: planTarget, plan_fact: planFact,
+    rate, plan_target: planTarget, plan_fact: planFact,
     plan_pct: Math.round(pct * 10) / 10,
     srch_ok: srchOk, apr_ok: aprOk, kpi_each: C.kpi, pay_kpi: payKpi,
     pay_plan: payPlan, plan_bonus_max: C.plan_bonus,
@@ -2348,7 +2349,7 @@ async function computeFinanceRows(y, m, dept) {
 
     // всі активні співробітники зі схемою fixed_rate
     const effDeptCode2 = `(CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.code ELSE d.code END)`;
-    let empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date,
+    let empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date, e.custom_rop_rate, e.role_teamlead_since,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.id ELSE d.id END) AS dept_id,
                          ${effDeptCode2} AS dept_code,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.name ELSE d.name END) AS dept_name,
@@ -2625,8 +2626,14 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
       }
       // продажі / відмови: рахуємо із збереженого salary_calc
       // РЗПК з вересня 2026 — нові формули (роздріб/МО/ресейл), замість
-      // старого percent_plan; місяці до вересня рахуються по-старому нижче
-      if (useRzpkNewSchemes && emp.dept_code === 'rzpk') {
+      // старого percent_plan; місяці до вересня рахуються по-старому нижче.
+      // Персональний виняток: якщо у співробітника задано власну дату
+      // переходу (role_teamlead_since) — вона перекриває загальну (вересень).
+      const empCutoverYm = emp.role_teamlead_since
+        ? (emp.role_teamlead_since.toISOString ? emp.role_teamlead_since.toISOString() : String(emp.role_teamlead_since)).slice(0, 7)
+        : RZPK_NEW_SCHEMES_CUTOVER_YM;
+      const useNewForThisEmp = curYm >= empCutoverYm;
+      if (useNewForThisEmp && emp.dept_code === 'rzpk') {
         const { worked: workedGraphNew } = countWorkAndTrain(schedByEmp[emp.id] || []);
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
@@ -2661,20 +2668,20 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         // це НЕ повинно заднім числом ламати її серпневу (і раніше) ЗП, коли
         // вона фактично була звичайним менеджером. До вересня трактуємо
         // роль 'teamlead' у РЗПК як 'manager' для розрахунку/картки.
-        const effRole = (emp.dept_code === 'rzpk' && emp.role === 'teamlead' && !useRzpkNewSchemes)
+        const effRole = (emp.dept_code === 'rzpk' && emp.role === 'teamlead' && !useNewForThisEmp)
           ? 'manager' : emp.role;
         if (['rop','head','teamlead'].includes(effRole)) {
           // РОП відділів продажів — своя мотивація
           if (effRole === 'rop' && ROP_CFG[emp.dept_code]) {
-            const rc = computeRopSalary(emp.dept_code, ropByEmp[emp.id]);
+            const rc = computeRopSalary(emp.dept_code, ropByEmp[emp.id], emp.custom_rop_rate);
             const adjList = adjByEmp[emp.id] || [];
             const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
             const total = rc.total + adjTotal;
-            const payout1 = ROP_CFG[emp.dept_code].rate / 2;   // аванс 1-го = половина ставки
+            const payout1 = rc.rate / 2;   // аванс 1-го = половина ставки (враховує персональну ставку)
             return {
               employee_id: emp.id, name: emp.name,
               dept_code: emp.dept_code, dept_name: emp.dept_name,
-              role: emp.role, level: emp.level,
+              role: effRole, level: emp.level,
               ...rc,
               adj_total: adjTotal, adjustments: adjList,
               total, payout1, payout2: Math.max(0, total - payout1),
@@ -2685,7 +2692,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
           return {
             employee_id: emp.id, name: emp.name,
             dept_code: emp.dept_code, dept_name: emp.dept_name,
-            role: emp.role, level: emp.level, scheme_type: 'sales',
+            role: effRole, level: emp.level, scheme_type: 'sales',
             total: null, advance: null, remainder: null, note: 'керівна роль',
           };
         }
@@ -2709,7 +2716,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         return {
           employee_id: emp.id, name: emp.name,
           dept_code: emp.dept_code, dept_name: emp.dept_name,
-          role: emp.role, level: emp.level,
+          role: effRole, level: emp.level,
           scheme_type: isOrder ? 'orders_count' : 'percent_plan',
           ...sc,
         };
