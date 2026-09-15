@@ -1457,8 +1457,10 @@ function isWorkStatus(status) {
   return /^\d{1,2}(:\d{2})?-\d{1,2}(:\d{2})?$/.test(status || '');   // довільний час "9-17", "10:15-18:30" тощо
 }
 
-// Дефолтний статус за кодом відділу і днем тижня (дзеркало фронтенду)
-function defaultStatusFor(deptCode, dow, empName) {
+// Дефолтний статус за кодом відділу і днем тижня (дзеркало фронтенду).
+// dateStr — дата запису (YYYY-MM-DD), потрібна для дато-залежних дефолтів
+// (напр. новий графік складу з 1 жовтня 2026).
+function defaultStatusFor(deptCode, dow, empName, dateStr) {
   if (['refuse','reactivation'].includes(deptCode)) return '9:30-17:30';
   if (empName === 'Климюк Марія') {
     if (dow === 0 || dow === 6) return 'вих';        // нд, сб
@@ -1469,7 +1471,7 @@ function defaultStatusFor(deptCode, dow, empName) {
   if (deptCode === 'admin' && empName === 'Мединська Ірина')
     return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
-  if (deptCode === 'warehouse') return '9-19';
+  if (deptCode === 'warehouse') return (dateStr && dateStr >= '2026-10-01') ? '9:00-18:30' : '9-19';
   if (deptCode === 'logistics') return dow === 0 ? 'вих' : '8:30-16:30';
   if (['management','training','admin','marketing','it'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
   return '10-18';
@@ -1488,7 +1490,7 @@ function buildMonthEntries(y, m, savedEntries, deptCode, empName, startDate) {
    const startYmd = startDate ? (startDate.toISOString ? startDate.toISOString().slice(0,10) : String(startDate).slice(0,10)) : null;
     if (date in saved) status = saved[date];
     else if (startYmd && date < startYmd) status = '';       // до старту порожньо
-    else status = defaultStatusFor(deptCode, dow, empName);
+    else status = defaultStatusFor(deptCode, dow, empName, date);
     out.push({ entry_date: date, status });
   }
   return out;
@@ -2399,7 +2401,7 @@ async function computeFinanceRows(y, m, dept) {
 
     // всі активні співробітники зі схемою fixed_rate
     const effDeptCode2 = `(CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.code ELSE d.code END)`;
-    let empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date, e.custom_rop_rate, e.role_teamlead_since,
+    let empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date, e.custom_rop_rate, e.role_teamlead_since, e.prev_role,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.id ELSE d.id END) AS dept_id,
                          ${effDeptCode2} AS dept_code,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.name ELSE d.name END) AS dept_name,
@@ -2752,10 +2754,13 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         // роль не має історії по місяцях (як і department_id раніше) — якщо
         // людину зробили тімлідом РЗПК заради нової формули (з вересня),
         // це НЕ повинно заднім числом ламати її серпневу (і раніше) ЗП, коли
-        // вона фактично була звичайним менеджером. До вересня трактуємо
-        // роль 'teamlead' у РЗПК як 'manager' для розрахунку/картки.
+        // вона фактично мала іншу роль. До дати переходу трактуємо роль
+        // 'teamlead' у РЗПК як emp.prev_role (роль, яку людина реально мала
+        // до переходу) — за замовчуванням 'manager' (як і було раніше),
+        // але може бути й 'rop' тощо для конкретного співробітника
+        // (напр. якщо вона була РОПом, а не звичайним менеджером).
         const effRole = (emp.dept_code === 'rzpk' && emp.role === 'teamlead' && !useNewForThisEmp)
-          ? 'manager' : emp.role;
+          ? (emp.prev_role || 'manager') : emp.role;
         if (['rop','head','teamlead'].includes(effRole)) {
           // РОП відділів продажів — своя мотивація
           if (effRole === 'rop' && ROP_CFG[emp.dept_code]) {
