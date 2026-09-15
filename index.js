@@ -1312,6 +1312,26 @@ function fasovkaDayAmount(r) {
   return (r.glass||0)*1 + (r.plastic||0)*1.5;
 }
 
+// ── Ставка погодинних схем (hourly / hourly_fixed) на КОНКРЕТНИЙ день ──
+// ПОДЕННИЙ розподіл rate_change_date/prev_base_rate — на відміну від
+// CASE у основному SELECT s.base_rate (used для fixed_rate), який перемикає
+// ставку ЦІЛИМИ МІСЯЦЯМИ (порівнює лише кінець періоду). Для погодинників
+// дата зміни ставки часто припадає на середину місяця (напр. 14.09), і
+// частину годин того самого місяця треба порахувати по старій ставці,
+// частину — по новій. Дні СТРОГО ДО rate_change_date — стара ставка
+// (prevRate), дні З rate_change_date включно — нова (currentRate).
+function hourlyRateForDay(currentRate, prevRate, changeDate, dateStr) {
+  const rate = parseFloat(currentRate) || 150;
+  if (changeDate) {
+    const cd = ymd(changeDate);
+    if (cd && dateStr < cd) {
+      const pr = parseFloat(prevRate);
+      if (!isNaN(pr)) return pr;
+    }
+  }
+  return rate;
+}
+
 app.get('/api/warehouse/daily', async (req, res) => {
   try {
     const { year, month, employee_id } = req.query;
@@ -2356,6 +2376,7 @@ async function computeFinanceRows(y, m, dept) {
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN e.prev_team ELSE e.team END) AS team,
                          s.scheme_type,
                          (CASE WHEN s.rate_change_date IS NOT NULL AND $2 < s.rate_change_date THEN s.prev_base_rate ELSE s.base_rate END) AS base_rate,
+                         s.base_rate AS raw_base_rate, s.prev_base_rate AS raw_prev_base_rate, s.rate_change_date AS raw_rate_change_date,
                          s.norm_days, s.norm_type, s.fixed_amount,
                          (SELECT MAX(se3.entry_date) FROM schedule_entries se3
                           WHERE se3.employee_id = e.id AND se3.status = '-') AS fired_date
@@ -2574,12 +2595,20 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
           total, advance: 0, remainder: total,
         };
       }
-      // вантажник: години × ставка
+      // вантажник: години × ставка (ПОДЕННО, з урахуванням rate_change_date
+      // всередині місяця — дні до дати зміни рахуються по prev_base_rate,
+      // з дати зміни включно — по новій base_rate)
       if (emp.scheme_type === 'hourly') {
-        const rate = parseFloat(emp.base_rate) || 150;
+        const rate = parseFloat(emp.raw_base_rate) || 150;
         const list = hrByEmp[emp.id] || [];
-        let hours = 0; list.forEach(r => hours += parseFloat(r.hours) || 0);
-        const hourPay = hours * rate;
+        let hours = 0, hourPay = 0;
+        list.forEach(r => {
+          const h = parseFloat(r.hours) || 0;
+          const dateStr = ymd(r.work_date);
+          const dayRate = hourlyRateForDay(emp.raw_base_rate, emp.raw_prev_base_rate, emp.raw_rate_change_date, dateStr);
+          hours += h;
+          hourPay += h * dayRate;
+        });
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
         const total = hourPay + adjTotal;
@@ -2781,12 +2810,20 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         };
       }
       // вантажник з фіксом: 5000 завжди (незалежно від графіка) + години × ставка
+      // (ПОДЕННО, з урахуванням rate_change_date всередині місяця — так само,
+      // як для звичайної 'hourly'; fixed_amount на дні НЕ ділиться)
       if (emp.scheme_type === 'hourly_fixed') {
-        const rate = parseFloat(emp.base_rate) || 150;
+        const rate = parseFloat(emp.raw_base_rate) || 150;
         const fixedAmount = parseFloat(emp.fixed_amount) || 0;
         const list = hrByEmp[emp.id] || [];
-        let hours = 0; list.forEach(r => hours += parseFloat(r.hours) || 0);
-        const hourPay = hours * rate;
+        let hours = 0, hourPay = 0;
+        list.forEach(r => {
+          const h = parseFloat(r.hours) || 0;
+          const dateStr = ymd(r.work_date);
+          const dayRate = hourlyRateForDay(emp.raw_base_rate, emp.raw_prev_base_rate, emp.raw_rate_change_date, dateStr);
+          hours += h;
+          hourPay += h * dayRate;
+        });
         const adjList2 = adjByEmp[emp.id] || [];
         const adjTotal2 = adjList2.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
         const total2 = fixedAmount + hourPay + adjTotal2;
@@ -3223,8 +3260,11 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     }
 
     // склад-співробітники (piece_warehouse + hourly + hourly_fixed + warehouse_hybrid)
+    // разом з raw prev_base_rate/rate_change_date — потрібно для поденного
+    // розрахунку ставки вантажників (hourly/hourly_fixed), якщо ставка
+    // змінюється всередині місяця (аналогічно computeFinanceRows).
     const emps = await q(
-      `SELECT e.id, e.name, s.scheme_type, s.base_rate
+      `SELECT e.id, e.name, s.scheme_type, s.base_rate, s.prev_base_rate, s.rate_change_date
        FROM employees e
        JOIN salary_schemes s ON s.employee_id = e.id
        WHERE e.is_active = true AND s.scheme_type IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid')
@@ -3257,7 +3297,8 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     });
     hr.forEach(r => {
       const emp = emps.find(e => e.id === r.employee_id);
-      const rate = emp ? (parseFloat(emp.base_rate)||150) : 150;
+      const dateStr = ymd(r.work_date);
+      const rate = emp ? hourlyRateForDay(emp.base_rate, emp.prev_base_rate, emp.rate_change_date, dateStr) : 150;
       const day = parseInt(String(r.work_date).slice(8,10));
       const key = `${r.employee_id}_${day}`;
       const hours = parseFloat(r.hours)||0;
