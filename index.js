@@ -960,7 +960,7 @@ app.put('/api/b2b-manager-salary', requireAuth, async (req, res) => {
 // з index.html) — для рядка "Ставка / % / Доплати / Штрафи" у шапці кожної вкладки експорту.
 function categorizeSalaryLabel(label, amount) {
   if (/%/.test(label)) return 'pct';
-  if (/Оклад|Ставка|Фікс|Переробка|Недопрацьовано|Упаковка|Фасовка|Вихід|Години × ставка/.test(label)) return 'rate';
+  if (/Оклад|Ставка|Фікс|Переробка|Недопрацьовано|Упаковка|Фасовка|Вихід|Години × ставка|Аванс/.test(label)) return 'rate';
   return amount < 0 ? 'penalty' : 'bonus';
 }
 function fundBreakdown(rows) {
