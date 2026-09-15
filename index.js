@@ -1332,6 +1332,36 @@ function hourlyRateForDay(currentRate, prevRate, changeDate, dateStr) {
   return rate;
 }
 
+// ── Ефективна фіксована частина (fixed_amount, схема hourly_fixed) за місяць ──
+// На відміну від погодинної ставки, fixed_amount — це фіксована місячна
+// сума, не прив'язана до окремих відпрацьованих днів (типу "5000 незалежно
+// від графіка"). Тому при зміні fixed_amount ВСЕРЕДИНІ місяця розподіляємо
+// пропорційно КАЛЕНДАРНИМ дням до/після дати зміни (а не робочим змінам).
+// Дні СТРОГО ДО fixedAmountChangeDate — стара сума (у своїй частці),
+// дні З fixedAmountChangeDate включно — нова.
+//   • дата зміни в минулому місяці або раніше (<= початок місяця) → весь
+//     місяць по НОВІЙ сумі;
+//   • дата зміни в майбутньому місяці (> кінець місяця) → весь місяць по
+//     СТАРІЙ сумі (зміна ще не настала);
+//   • дата зміни всередині місяця → пропорційний розподіл по днях.
+function fixedAmountForMonth(y, m, currentAmount, prevAmount, changeDate) {
+  const cur = parseFloat(currentAmount) || 0;
+  if (!changeDate) return cur;
+  const pr = parseFloat(prevAmount);
+  if (isNaN(pr)) return cur;
+  const cd = ymd(changeDate);
+  if (!cd) return cur;
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const monthStart = `${y}-${String(m).padStart(2,'0')}-01`;
+  const monthEnd = `${y}-${String(m).padStart(2,'0')}-${String(daysInMonth).padStart(2,'0')}`;
+  if (cd <= monthStart) return cur;            // зміна вже настала до/на початку місяця — вся сума нова
+  if (cd > monthEnd) return pr;                // зміна ще попереду — вся сума стара
+  const changeDay = parseInt(cd.slice(8, 10)); // перший день по НОВІЙ сумі
+  const daysOld = changeDay - 1;
+  const daysNew = daysInMonth - daysOld;
+  return (pr * daysOld + cur * daysNew) / daysInMonth;
+}
+
 app.get('/api/warehouse/daily', async (req, res) => {
   try {
     const { year, month, employee_id } = req.query;
@@ -2378,6 +2408,7 @@ async function computeFinanceRows(y, m, dept) {
                          (CASE WHEN s.rate_change_date IS NOT NULL AND $2 < s.rate_change_date THEN s.prev_base_rate ELSE s.base_rate END) AS base_rate,
                          s.base_rate AS raw_base_rate, s.prev_base_rate AS raw_prev_base_rate, s.rate_change_date AS raw_rate_change_date,
                          s.norm_days, s.norm_type, s.fixed_amount,
+                         s.prev_fixed_amount AS raw_prev_fixed_amount, s.fixed_amount_change_date AS raw_fixed_amount_change_date,
                          (SELECT MAX(se3.entry_date) FROM schedule_entries se3
                           WHERE se3.employee_id = e.id AND se3.status = '-') AS fired_date
                   FROM employees e
@@ -2814,7 +2845,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
       // як для звичайної 'hourly'; fixed_amount на дні НЕ ділиться)
       if (emp.scheme_type === 'hourly_fixed') {
         const rate = parseFloat(emp.raw_base_rate) || 150;
-        const fixedAmount = parseFloat(emp.fixed_amount) || 0;
+        const fixedAmount = fixedAmountForMonth(y, m, emp.fixed_amount, emp.raw_prev_fixed_amount, emp.raw_fixed_amount_change_date);
         const list = hrByEmp[emp.id] || [];
         let hours = 0, hourPay = 0;
         list.forEach(r => {
