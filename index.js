@@ -2404,7 +2404,7 @@ async function computeFinanceRows(y, m, dept) {
                          ${effDeptCode2} AS dept_code,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.name ELSE d.name END) AS dept_name,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN e.prev_team ELSE e.team END) AS team,
-                         s.scheme_type,
+                         (CASE WHEN s.scheme_type_change_date IS NOT NULL AND $2 < s.scheme_type_change_date THEN s.prev_scheme_type ELSE s.scheme_type END) AS scheme_type,
                          (CASE WHEN s.rate_change_date IS NOT NULL AND $2 < s.rate_change_date THEN s.prev_base_rate ELSE s.base_rate END) AS base_rate,
                          s.base_rate AS raw_base_rate, s.prev_base_rate AS raw_prev_base_rate, s.rate_change_date AS raw_rate_change_date,
                          s.norm_days, s.norm_type, s.fixed_amount,
@@ -2433,6 +2433,32 @@ async function computeFinanceRows(y, m, dept) {
       if (!emp.fired_date) return true;
       const firedYm = (emp.fired_date.toISOString ? emp.fired_date.toISOString() : String(emp.fired_date)).slice(0, 7);
       return firedYm >= curYm;
+    });
+
+    // ── ГРАФІК СТАВОК (salary_rate_schedule) — підтримка ДЕКІЛЬКОХ
+    // послідовних підвищень ставки поспіль (на відміну від prev_base_rate/
+    // rate_change_date, який тримає лише ОДИН перехід). Для кожного
+    // співробітника, у якого є хоч один рядок у цій таблиці, обираємо
+    // ставку з НАЙПІЗНІШОЮ effective_date <= кінець поточного місяця.
+    // Якщо підходящого рядка нема (місяць раніше першої запланованої дати) —
+    // падаємо назад на emp.base_rate (уже вирішений через rate_change_date/
+    // scheme_type_change_date вище — звичайна логіка одного переходу).
+    let scheduleRows = [];
+    try {
+      scheduleRows = await q(
+        `SELECT employee_id, effective_date, base_rate FROM salary_rate_schedule ORDER BY employee_id, effective_date`);
+    } catch (e) { scheduleRows = []; }
+    const scheduleByEmp = {};
+    scheduleRows.forEach(r => { (scheduleByEmp[r.employee_id] = scheduleByEmp[r.employee_id] || []).push(r); });
+    emps.forEach(emp => {
+      const sched = scheduleByEmp[emp.id];
+      if (!sched || !sched.length) return;
+      let best = null;
+      sched.forEach(s => {
+        const ed = ymd(s.effective_date);
+        if (ed <= end && (!best || ed > best.ed)) best = { ed, base_rate: parseFloat(s.base_rate) || 0 };
+      });
+      if (best) emp.base_rate = best.base_rate;
     });
 
     // графік за місяць
