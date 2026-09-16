@@ -1202,16 +1202,84 @@ app.get('/api/salary-schemes', async (_, res) => {
 
 app.put('/api/salary-schemes', requireAuth, async (req, res) => {
   try {
-    const { employee_id, scheme_type, base_rate, norm_days, norm_type, fixed_amount } = req.body;
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const { employee_id, scheme_type, base_rate, norm_days, norm_type, fixed_amount,
+            prev_base_rate, rate_change_date, prev_fixed_amount, fixed_amount_change_date,
+            prev_scheme_type, scheme_type_change_date } = req.body;
+    const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
+    if (empRow.length && !canDept(req.user, empRow[0].code))
+      return res.status(403).json({ error: 'Немає доступу до цього відділу' });
+    if (req.user.only_employee_id && req.user.only_employee_id !== parseInt(employee_id))
+      return res.status(403).json({ error: 'Немає доступу до цього співробітника' });
+    const before = await q(`SELECT * FROM salary_schemes WHERE employee_id=$1`, [employee_id]);
     const rows = await q(
-      `INSERT INTO salary_schemes (employee_id, scheme_type, base_rate, norm_days, norm_type, fixed_amount, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,NOW())
+      `INSERT INTO salary_schemes (employee_id, scheme_type, base_rate, norm_days, norm_type, fixed_amount,
+         prev_base_rate, rate_change_date, prev_fixed_amount, fixed_amount_change_date,
+         prev_scheme_type, scheme_type_change_date, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
        ON CONFLICT (employee_id)
-       DO UPDATE SET scheme_type=$2, base_rate=$3, norm_days=$4, norm_type=$5, fixed_amount=$6, updated_at=NOW()
+       DO UPDATE SET scheme_type=$2, base_rate=$3, norm_days=$4, norm_type=$5, fixed_amount=$6,
+         prev_base_rate=$7, rate_change_date=$8, prev_fixed_amount=$9, fixed_amount_change_date=$10,
+         prev_scheme_type=$11, scheme_type_change_date=$12, updated_at=NOW()
        RETURNING *`,
-      [employee_id, scheme_type || 'fixed_rate', base_rate || 0, norm_days || 22, norm_type || 'fixed', fixed_amount || 0]
+      [employee_id, scheme_type || 'fixed_rate', base_rate || 0, norm_days || 22, norm_type || 'fixed', fixed_amount || 0,
+       (prev_base_rate === '' || prev_base_rate == null) ? null : prev_base_rate,
+       rate_change_date || null,
+       (prev_fixed_amount === '' || prev_fixed_amount == null) ? null : prev_fixed_amount,
+       fixed_amount_change_date || null,
+       prev_scheme_type || null, scheme_type_change_date || null]
     );
+    try {
+      await q(`INSERT INTO scheme_change_log (employee_id, changed_by, change_type, old_values, new_values)
+                VALUES ($1,$2,'salary_scheme',$3,$4)`,
+        [employee_id, req.user.full_name, JSON.stringify(before[0]||null), JSON.stringify(rows[0])]);
+    } catch (logErr) { console.error('scheme_change_log insert failed:', logErr.message); }
     res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── МОТИВАЦІЯ ПРОДАЖНИКІВ: роль/команда/дата переходу на нову формулу ──
+// Для відділів продажів (rzpk/refuse/reactivation/hot/...) саму формулу ЗП
+// визначає НЕ salary_schemes, а поєднання employees.role + employees.team +
+// employees.role_teamlead_since/prev_role. Цей ендпоінт дозволяє керівникам
+// з доступом до ЗП міняти ці поля самостійно, без прямого доступу до БД.
+app.put('/api/employee-motivation-role', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+    const { employee_id, role, team, role_teamlead_since, prev_role, custom_rop_rate } = req.body;
+    const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
+    if (!empRow.length) return res.status(404).json({ error: 'Співробітник не знайдений' });
+    if (!canDept(req.user, empRow[0].code)) return res.status(403).json({ error: 'Немає доступу до цього відділу' });
+    const before = await q(`SELECT role, team, role_teamlead_since, prev_role, custom_rop_rate FROM employees WHERE id=$1`, [employee_id]);
+    const rows = await q(
+      `UPDATE employees SET
+         role = COALESCE($1, role),
+         team = $2,
+         role_teamlead_since = $3,
+         prev_role = $4,
+         custom_rop_rate = $5
+       WHERE id=$6 RETURNING id, name, role, team, role_teamlead_since, prev_role, custom_rop_rate`,
+      [role || null, team || null, role_teamlead_since || null, prev_role || null,
+       (custom_rop_rate === '' || custom_rop_rate == null) ? null : custom_rop_rate, employee_id]
+    );
+    try {
+      await q(`INSERT INTO scheme_change_log (employee_id, changed_by, change_type, old_values, new_values)
+                VALUES ($1,$2,'role_motivation',$3,$4)`,
+        [employee_id, req.user.full_name, JSON.stringify(before[0]||null), JSON.stringify(rows[0])]);
+    } catch (logErr) { console.error('scheme_change_log insert failed:', logErr.message); }
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ЛОГ ЗМІН МОТИВАЦІЇ/СХЕМИ ЗП — хто/коли змінив (для прозорості) ──
+app.get('/api/scheme-change-log', requireFinance, async (req, res) => {
+  try {
+    const { employee_id } = req.query;
+    let sql = `SELECT l.*, e.name AS emp_name FROM scheme_change_log l JOIN employees e ON e.id=l.employee_id WHERE 1=1`;
+    const params = [];
+    if (employee_id) { sql += ` AND l.employee_id=$${params.length+1}`; params.push(parseInt(employee_id)); }
+    sql += ` ORDER BY l.changed_at DESC LIMIT 200`;
+    res.json(await q(sql, params));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
