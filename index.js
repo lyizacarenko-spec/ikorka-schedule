@@ -102,7 +102,7 @@ function computeTeamleadRetailSalary(row, workedGraph) {
     scheme_type: 'teamlead_retail', base_rate: base, worked_days: worked,
     plan_target: planTarget, plan_fact: planFact, plan_pct: Math.round(pct * 10) / 10,
     bonus_rate: rate, bonus, bonus_manual: bonusManual, penalty,
-    total, payout1, payout2, pay_schedule: 'staff', advance: payout1, remainder: payout2,
+    total, payout1, payout2, pay_schedule: 'sales', advance: payout1, remainder: payout2,
   };
 }
 
@@ -127,7 +127,7 @@ function computeTeamleadMoSalary(row, workedGraph) {
   return {
     scheme_type: 'teamlead_mo', base_rate: base, worked_days: worked,
     returned_clients: cnt, bonus, bonus_manual: bonusManual, penalty,
-    total, payout1, payout2, pay_schedule: 'staff', advance: payout1, remainder: payout2,
+    total, payout1, payout2, pay_schedule: 'sales', advance: payout1, remainder: payout2,
   };
 }
 
@@ -2874,7 +2874,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
               ...rc,
               adj_total: adjTotal, adjustments: adjList,
               total, payout1, payout2: Math.max(0, total - payout1),
-              pay_schedule: 'staff',   // керівники: аванс 15-го / залишок 1-го наст. (як ставочники, НЕ як продажники)
+              pay_schedule: 'sales',
               advance: payout1, remainder: Math.max(0, total - payout1),
             };
           }
