@@ -1272,14 +1272,44 @@ app.put('/api/employee-motivation-role', requireAuth, async (req, res) => {
 });
 
 // ── ЛОГ ЗМІН МОТИВАЦІЇ/СХЕМИ ЗП — хто/коли змінив (для прозорості) ──
+// Також рахує людський опис зміни (було→стало, %), і обмежує видимість
+// по dept_codes користувача — та сама логіка, що й доступ до Фінансів.
 app.get('/api/scheme-change-log', requireFinance, async (req, res) => {
   try {
-    const { employee_id } = req.query;
-    let sql = `SELECT l.*, e.name AS emp_name FROM scheme_change_log l JOIN employees e ON e.id=l.employee_id WHERE 1=1`;
+    const { employee_id, dept } = req.query;
+    let sql = `SELECT l.*, e.name AS emp_name, d.code AS dept_code, d.name AS dept_name
+               FROM scheme_change_log l
+               JOIN employees e ON e.id = l.employee_id
+               JOIN departments d ON d.id = e.department_id
+               WHERE 1=1`;
     const params = [];
     if (employee_id) { sql += ` AND l.employee_id=$${params.length+1}`; params.push(parseInt(employee_id)); }
-    sql += ` ORDER BY l.changed_at DESC LIMIT 200`;
-    res.json(await q(sql, params));
+    if (dept) { sql += ` AND d.code=$${params.length+1}`; params.push(dept); }
+    sql += ` ORDER BY l.changed_at DESC LIMIT 300`;
+    let rows = await q(sql, params);
+    if (req.user.depts) rows = rows.filter(r => req.user.depts.includes(r.dept_code));
+    rows = rows.map(r => {
+      const ov = r.old_values || {}, nv = r.new_values || {};
+      const parts = [];
+      if (r.change_type === 'salary_scheme') {
+        const oldRate = parseFloat(ov.base_rate), newRate = parseFloat(nv.base_rate);
+        if (!isNaN(oldRate) && !isNaN(newRate) && oldRate !== newRate) {
+          const pct = oldRate ? Math.round((newRate - oldRate) / oldRate * 1000) / 10 : null;
+          parts.push(`Ставка: ${oldRate}→${newRate} ₴${pct != null ? ` (${pct > 0 ? '+' : ''}${pct}%)` : ''}`);
+        }
+        const oldFixed = parseFloat(ov.fixed_amount), newFixed = parseFloat(nv.fixed_amount);
+        if (!isNaN(oldFixed) && !isNaN(newFixed) && oldFixed !== newFixed) {
+          const pct = oldFixed ? Math.round((newFixed - oldFixed) / oldFixed * 1000) / 10 : null;
+          parts.push(`Фікс: ${oldFixed}→${newFixed} ₴${pct != null ? ` (${pct > 0 ? '+' : ''}${pct}%)` : ''}`);
+        }
+        if ((ov.scheme_type || null) !== (nv.scheme_type || null)) parts.push(`Схема: ${ov.scheme_type || '—'}→${nv.scheme_type || '—'}`);
+      } else if (r.change_type === 'role_motivation') {
+        if ((ov.role || null) !== (nv.role || null)) parts.push(`Роль: ${ov.role || '—'}→${nv.role || '—'}`);
+        if ((ov.team || null) !== (nv.team || null)) parts.push(`Команда: ${ov.team || '—'}→${nv.team || '—'}`);
+      }
+      return { ...r, summary: parts.join('; ') || '(без видимих числових змін)' };
+    });
+    res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
