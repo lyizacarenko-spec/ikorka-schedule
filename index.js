@@ -2043,8 +2043,13 @@ function buildBreakdown(r) {
 
   switch (r.scheme_type) {
     case 'fixed_rate':
-      push('Оклад', r.base_rate);
-      push(r.diff_days >= 0 ? 'Переробка' : 'Недопрацьовано', r.day_adjust);
+      if (r.is_scheme_transition) {
+        push('Відрядна/фасовка (до переходу)', r.piece_total);
+        push('Оклад за відпрац. дні (з дати переходу)', r.day_adjust);
+      } else {
+        push('Оклад', r.base_rate);
+        push(r.diff_days >= 0 ? 'Переробка' : 'Недопрацьовано', r.day_adjust);
+      }
       break;
     case 'warehouse_hybrid':
       push('Фікс (оклад ± переробка)', r.fix_total);
@@ -2505,6 +2510,7 @@ async function computeFinanceRows(y, m, dept) {
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.name ELSE d.name END) AS dept_name,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN e.prev_team ELSE e.team END) AS team,
                          (CASE WHEN s.scheme_type_change_date IS NOT NULL AND $2 < s.scheme_type_change_date THEN s.prev_scheme_type ELSE s.scheme_type END) AS scheme_type,
+                         s.scheme_type AS raw_scheme_type, s.prev_scheme_type AS raw_prev_scheme_type, s.scheme_type_change_date AS raw_scheme_type_change_date,
                          (CASE WHEN s.rate_change_date IS NOT NULL AND $2 < s.rate_change_date THEN s.prev_base_rate ELSE s.base_rate END) AS base_rate,
                          s.base_rate AS raw_base_rate, s.prev_base_rate AS raw_prev_base_rate, s.rate_change_date AS raw_rate_change_date,
                          s.norm_days, s.norm_type, s.fixed_amount,
@@ -2688,6 +2694,54 @@ async function computeFinanceRows(y, m, dept) {
     });
 
     const rows = emps.map(emp => {
+      // ═══ ПЕРЕХІД СХЕМИ ВСЕРЕДИНІ МІСЯЦЯ (напр. упаковник → комірник на
+      // окладі з 15-го числа): scheme_type_change_date падає МІЖ початком
+      // і кінцем поточного місяця (а не на межі місяців, як зазвичай) —
+      // тоді дні ДО дати переходу рахуємо за старою схемою (відрядна:
+      // упаковка/фасовка/вихід), дні З дати переходу — за окладом, але
+      // ЗА ВІДПРАЦЬОВАНІ ДНІ (як новачок), а не «оклад ± різниця від 22»,
+      // бо оклад належить лише за частину місяця.
+      const rawChangeDate = ymd(emp.raw_scheme_type_change_date);
+      const isMidMonthSchemeSwitch = rawChangeDate && rawChangeDate > start && rawChangeDate <= end;
+      if (isMidMonthSchemeSwitch
+          && ['piece_warehouse', 'warehouse_hybrid'].includes(emp.raw_prev_scheme_type)
+          && emp.scheme_type === 'fixed_rate') {
+        const whList = whByEmp[emp.id] || [];
+        const oldList = whList.filter(r => ymd(r.work_date) < rawChangeDate);
+        let packTotal = 0, fasTotal = 0, exitTotal = 0, oldTotal = 0;
+        oldList.forEach(r => {
+          const a = warehouseDayAmount(r);
+          oldTotal += a.total; packTotal += a.pack; fasTotal += a.fasovka; exitTotal += a.exit;
+        });
+        const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
+        const base = parseFloat(emp.base_rate) || 0;
+        const dayPrice = base / 22;
+        let workedNew = 0;
+        monthEntries.forEach(e => {
+          if (e.entry_date >= rawChangeDate && isWorkStatus(e.status)) workedNew += 1;
+        });
+        const newTotal = workedNew * dayPrice;
+        const adjList = adjByEmp[emp.id] || [];
+        const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        const total = oldTotal + newTotal + adjTotal;
+        const payout1 = oldTotal;                 // 15-те: відрядна частина (до переходу)
+        const payout2 = newTotal + adjTotal;       // 1-ше наст.: оклад за відпрац. дні + корегування
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: 'fixed_rate',
+          is_scheme_transition: true,
+          scheme_change_date: rawChangeDate,
+          base_rate: base, day_price: dayPrice,
+          worked_days: workedNew, target_days: null, diff_days: null, day_adjust: newTotal,
+          piece_total: oldTotal, pack_total: packTotal, fas_total: fasTotal, exit_total: exitTotal,
+          adj_total: adjTotal, adjustments: adjList,
+          total, payout1, payout2,
+          pay_schedule: 'staff',
+          advance: payout1, remainder: payout2,
+        };
+      }
       // гібрид начальника складу: фікс (як логісти, 40000/22) + фасовка (скло/пластик) + корегування
       if (emp.scheme_type === 'warehouse_hybrid') {
         // фікс-частина: computeFixedRate з базою base_rate, norm_type='fixed' (норма 22)
@@ -3423,17 +3477,35 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     // разом з raw prev_base_rate/rate_change_date — потрібно для поденного
     // розрахунку ставки вантажників (hourly/hourly_fixed), якщо ставка
     // змінюється всередині місяця (аналогічно computeFinanceRows).
-    const emps = await q(
-      `SELECT e.id, e.name, s.scheme_type, s.base_rate, s.prev_base_rate, s.rate_change_date
-       FROM employees e
-       JOIN salary_schemes s ON s.employee_id = e.id
-       WHERE e.is_active = true AND s.scheme_type IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid')
-       ORDER BY e.name`);
-    // мапа схем для правильного підрахунку (гібрид рахує ТІЛЬКИ фасовку у тижнях)
-    const schemeById = {}; emps.forEach(e => { schemeById[e.id] = e.scheme_type; });
-
     const start = `${y}-${String(m).padStart(2,'0')}-01`;
     const end   = `${y}-${String(m).padStart(2,'0')}-${String(daysInMonth).padStart(2,'0')}`;
+
+    // окрім тих, у кого схема ЗАРАЗ склад-відрядна/гібрид/погодинна, беремо
+    // ще й тих, у кого схема ПОМІНЯЛАСЬ на щось інше (напр. на оклад) САМЕ
+    // ВСЕРЕДИНІ цього місяця — інакше дні ДО дати переходу (коли людина ще
+    // фактично пакувала/фасувала) зникають з тижневого звіту заднім числом.
+    const emps = await q(
+      `SELECT e.id, e.name, s.scheme_type, s.base_rate, s.prev_base_rate, s.rate_change_date,
+              s.prev_scheme_type, s.scheme_type_change_date
+       FROM employees e
+       JOIN salary_schemes s ON s.employee_id = e.id
+       WHERE e.is_active = true
+         AND (
+           s.scheme_type IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid')
+           OR (s.scheme_type_change_date BETWEEN $1 AND $2
+               AND s.prev_scheme_type IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid'))
+         )
+       ORDER BY e.name`, [start, end]);
+    // мапа схем для правильного підрахунку (гібрид рахує ТІЛЬКИ фасовку у тижнях)
+    // — для тих, хто вже перейшов на іншу схему цього місяця, використовуємо
+    // ПОПЕРЕДНЮ схему (саме за нею рахувались дні до дати переходу).
+    const schemeById = {};
+    emps.forEach(e => {
+      const cd = ymd(e.scheme_type_change_date);
+      const usesPrev = cd && cd >= start && cd <= end
+        && ['piece_warehouse','hourly','hourly_fixed','warehouse_hybrid'].includes(e.scheme_type) === false;
+      schemeById[e.id] = usesPrev ? e.prev_scheme_type : e.scheme_type;
+    });
     const wh = await q(`SELECT * FROM warehouse_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
     const hr = await q(`SELECT * FROM hourly_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
 
