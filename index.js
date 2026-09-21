@@ -2745,7 +2745,12 @@ async function computeFinanceRows(y, m, dept) {
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
         const total = oldTotal + newTotal + adjTotal;
-        const payout1 = oldTotal;                 // 15-те: відрядна частина (до переходу)
+        // Відрядна частина (до переходу) НЕ йде в payout1/payout2 — вона,
+        // як і фасовка у warehouse_hybrid, виплачується ОКРЕМО через "Склад
+        // по тижнях" (де вже й позначається виплаченою). Показувати її ЩЕ
+        // РАЗ як суму до виплати в 15-те/1-ше тут — подвійний облік. payout1
+        // лишаємо null (прочерк), в payout2 — тільки оклад за нові дні.
+        const payout1 = null;
         const payout2 = newTotal + adjTotal;       // 1-ше наст.: оклад за відпрац. дні + корегування
         return {
           employee_id: emp.id, name: emp.name,
