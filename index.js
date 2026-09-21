@@ -1288,6 +1288,7 @@ app.get('/api/scheme-change-log', requireFinance, async (req, res) => {
     sql += ` ORDER BY l.changed_at DESC LIMIT 300`;
     let rows = await q(sql, params);
     if (req.user.depts) rows = rows.filter(r => req.user.depts.includes(r.dept_code));
+    if (req.user.only_employee_id) rows = rows.filter(r => r.employee_id === req.user.only_employee_id);
     rows = rows.map(r => {
       const ov = r.old_values || {}, nv = r.new_values || {};
       const parts = [];
@@ -1995,9 +1996,26 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
   //   Виплата 1 = АВАНС (15-те число поточного місяця) = половина окладу
   //   Виплата 2 = залишок ставки + допки (1-ше число наступного місяця)
   //   Аванс не може перевищувати підсумок (щоб виплата 2 не була від'ємною).
-  let payout1 = base / 2;                      // аванс 15-го
-  if (payout1 > total) payout1 = Math.max(0, total);
-  let payout2 = Math.max(0, total - payout1); // залишок 1-го наст. місяця
+  let payout1, payout2;
+  if (isNewStaff) {
+    // Новачок: аванс 15-го рахуємо ЗА ФАКТОМ відпрацьованих днів періоду
+    // 1-14, а не половиною окладу — інакше, якщо людина вийшла вже після
+    // 15-го, ЦІЛА її зарплата (за дні 18-30, напр.) помилково потрапляла б
+    // у виплату "15-те", хоча по факту вона має піти в "1-ше наст.".
+    const p1 = periodRange(y, m, 1), p2 = periodRange(y, m, 2);
+    let worked1 = 0, worked2 = 0;
+    entries.forEach(e => {
+      if (!isWorkStatus(e.status)) return;
+      if (e.entry_date >= p1.from && e.entry_date <= p1.to) worked1 += 1;
+      else if (e.entry_date >= p2.from && e.entry_date <= p2.to) worked2 += 1;
+    });
+    payout1 = worked1 * dayPrice;
+    payout2 = worked2 * dayPrice + adjTotal;
+  } else {
+    payout1 = base / 2;                      // аванс 15-го
+    if (payout1 > total) payout1 = Math.max(0, total);
+    payout2 = Math.max(0, total - payout1); // залишок 1-го наст. місяця
+  }
 
   if (employeeId && SINGLE_PAYOUT_IDS.includes(employeeId)) {
     payout1 = 0;
@@ -3328,6 +3346,12 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     // без обмеження в user.depts — фінанси повні; з обмеженням — тільки дозволені відділи
     if (req.user.depts) {
       rows = rows.filter(r => req.user.depts.includes(r.dept_code));
+    }
+    // тим, кому дозволено бачити ЗП лише ОДНОГО конкретного співробітника
+    // (напр. керівник з доступом до мотивації лише свого підлеглого) —
+    // не показуємо весь відділ, тільки цей рядок.
+    if (req.user.only_employee_id) {
+      rows = rows.filter(r => r.employee_id === req.user.only_employee_id);
     }
     // статуси виплат (галочка бухгалтера + ручні суми)
     let payStat = [];
