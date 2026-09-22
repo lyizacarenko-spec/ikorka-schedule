@@ -3523,19 +3523,31 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
        JOIN salary_schemes s ON s.employee_id = e.id
        WHERE e.is_active = true
          AND (
-           s.scheme_type IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid')
+           -- ефективна схема на ВЕСЬ місяць (як у computeFinanceRows): якщо
+           -- дата переходу ще не настала до кінця місяця — рахуємо стару
+           -- схему (охоплює і випадок "перехід стоїть з наступного місяця",
+           -- напр. Довбня: 01.10 → у вересні вона ще вся warehouse_hybrid,
+           -- а не fixed_rate, хоча в БД поточне значення вже нове).
+           (CASE WHEN s.scheme_type_change_date IS NOT NULL AND $2 < s.scheme_type_change_date
+                 THEN s.prev_scheme_type ELSE s.scheme_type END)
+             IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid')
+           -- + перехід САМЕ ВСЕРЕДИНІ цього місяця (напр. Шквіра: 15.09) —
+           -- дні до дати переходу все одно рахувались за старою схемою.
            OR (s.scheme_type_change_date BETWEEN $1 AND $2
                AND s.prev_scheme_type IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid'))
          )
        ORDER BY e.name`, [start, end]);
     // мапа схем для правильного підрахунку (гібрид рахує ТІЛЬКИ фасовку у тижнях)
-    // — для тих, хто вже перейшов на іншу схему цього місяця, використовуємо
-    // ПОПЕРЕДНЮ схему (саме за нею рахувались дні до дати переходу).
+    // — для тих, у кого дата переходу ще не настала (весь місяць) або настала
+    // ВСЕРЕДИНІ місяця, використовуємо ПОПЕРЕДНЮ схему (саме за нею рахувались
+    // дні до дати переходу).
     const schemeById = {};
     emps.forEach(e => {
       const cd = ymd(e.scheme_type_change_date);
-      const usesPrev = cd && cd >= start && cd <= end
+      const wholeMonthBeforeChange = cd && end < cd;
+      const midMonthChange = cd && cd >= start && cd <= end
         && ['piece_warehouse','hourly','hourly_fixed','warehouse_hybrid'].includes(e.scheme_type) === false;
+      const usesPrev = wholeMonthBeforeChange || midMonthChange;
       schemeById[e.id] = usesPrev ? e.prev_scheme_type : e.scheme_type;
     });
     const wh = await q(`SELECT * FROM warehouse_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
