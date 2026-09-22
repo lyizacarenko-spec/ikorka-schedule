@@ -3516,6 +3516,14 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     // ще й тих, у кого схема ПОМІНЯЛАСЬ на щось інше (напр. на оклад) САМЕ
     // ВСЕРЕДИНІ цього місяця — інакше дні ДО дати переходу (коли людина ще
     // фактично пакувала/фасувала) зникають з тижневого звіту заднім числом.
+    // Довбня Наталья (id=160) вже давно переведена на fixed_rate НАПРЯМУ в
+    // БД (scheme_type='fixed_rate', prev_scheme_type/scheme_type_change_date
+    // так і лишились NULL — той самий механізм, що для Шквіри, тут просто не
+    // застосований), тому дата-орієнтована CASE нижче її не бачить. Але вона
+    // й далі фактично здає фасовку (є записи у warehouse_daily) — тому
+    // ловимо її явним винятком, а не переробляємо її схему в БД (щоб не
+    // зачепити вже порахований/позначений виплаченим підсумок у "Фінансах").
+    const WAREHOUSE_HYBRID_FALLBACK_IDS = [160];
     const emps = await q(
       `SELECT e.id, e.name, s.scheme_type, s.base_rate, s.prev_base_rate, s.rate_change_date,
               s.prev_scheme_type, s.scheme_type_change_date
@@ -3525,9 +3533,8 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
          AND (
            -- ефективна схема на ВЕСЬ місяць (як у computeFinanceRows): якщо
            -- дата переходу ще не настала до кінця місяця — рахуємо стару
-           -- схему (охоплює і випадок "перехід стоїть з наступного місяця",
-           -- напр. Довбня: 01.10 → у вересні вона ще вся warehouse_hybrid,
-           -- а не fixed_rate, хоча в БД поточне значення вже нове).
+           -- схему (охоплює й випадок "перехід стоїть з наступного місяця",
+           -- коли він коректно записаний через scheme_type_change_date).
            (CASE WHEN s.scheme_type_change_date IS NOT NULL AND $2 < s.scheme_type_change_date
                  THEN s.prev_scheme_type ELSE s.scheme_type END)
              IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid')
@@ -3535,14 +3542,17 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
            -- дні до дати переходу все одно рахувались за старою схемою.
            OR (s.scheme_type_change_date BETWEEN $1 AND $2
                AND s.prev_scheme_type IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid'))
+           -- + явний виняток (див. коментар вище)
+           OR e.id = ANY($3)
          )
-       ORDER BY e.name`, [start, end]);
+       ORDER BY e.name`, [start, end, WAREHOUSE_HYBRID_FALLBACK_IDS]);
     // мапа схем для правильного підрахунку (гібрид рахує ТІЛЬКИ фасовку у тижнях)
     // — для тих, у кого дата переходу ще не настала (весь місяць) або настала
     // ВСЕРЕДИНІ місяця, використовуємо ПОПЕРЕДНЮ схему (саме за нею рахувались
     // дні до дати переходу).
     const schemeById = {};
     emps.forEach(e => {
+      if (WAREHOUSE_HYBRID_FALLBACK_IDS.includes(e.id)) { schemeById[e.id] = 'warehouse_hybrid'; return; }
       const cd = ymd(e.scheme_type_change_date);
       const wholeMonthBeforeChange = cd && end < cd;
       const midMonthChange = cd && cd >= start && cd <= end
