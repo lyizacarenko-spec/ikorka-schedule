@@ -17,7 +17,8 @@ const SERVICE_ACCOUNT = {
 
 // ── Групи відділів ───────────────────────────────────────────
 // Продажі — ЗП по % виконання плану
-const SALES_DEPTS = ['rzpk','retail','wholesale','resellers','hot'];
+// vin_op (Вінниця — Відділ продажу) — по аналогії з РЗПК-Роздріб Дніпра
+const SALES_DEPTS = ['rzpk','retail','wholesale','resellers','hot','vin_op'];
 // Реактивація/Відмови — ЗП по кількості замовлень
 const ORDER_DEPTS = ['refuse','reactivation'];
 
@@ -2984,7 +2985,9 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         ? (emp.role_teamlead_since.toISOString ? emp.role_teamlead_since.toISOString() : String(emp.role_teamlead_since)).slice(0, 7)
         : RZPK_NEW_SCHEMES_CUTOVER_YM;
       const useNewForThisEmp = curYm >= empCutoverYm;
-      if (useNewForThisEmp && emp.dept_code === 'rzpk') {
+      // vin_op (Вінниця — Відділ продажу) рахується тими ж формулами, що й
+      // РЗПК-Роздріб Дніпра — по аналогії, за проханням користувача
+      if (useNewForThisEmp && (emp.dept_code === 'rzpk' || emp.dept_code === 'vin_op')) {
         const { worked: workedGraphNew } = countWorkAndTrain(schedByEmp[emp.id] || []);
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
