@@ -484,9 +484,19 @@ app.get('/health', (_, res) => res.json({ ok: true }));
 // ── DEPARTMENTS ──────────────────────────────────────────────
 app.get('/api/departments', requireAuth, async (req, res) => {
   try {
-    const rows = await q(`SELECT * FROM departments
-                      WHERE COALESCE(is_active, true) = true
-                      ORDER BY id`);
+    // sort_order — необов'язкова колонка (для ручного порядку вкладок,
+    // напр. філія Вінниця); якщо міграція ще не виконана — падаємо назад
+    // на звичайний ORDER BY id, як і раніше.
+    let rows;
+    try {
+      rows = await q(`SELECT * FROM departments
+                        WHERE COALESCE(is_active, true) = true
+                        ORDER BY COALESCE(sort_order, id)`);
+    } catch (e) {
+      rows = await q(`SELECT * FROM departments
+                        WHERE COALESCE(is_active, true) = true
+                        ORDER BY id`);
+    }
     const restricted = await getRestrictedDeptCodes();
     res.json(rows.filter(r => canSeeDept(req.user, r.code, restricted)));
   }
@@ -496,7 +506,12 @@ app.get('/api/departments', requireAuth, async (req, res) => {
 // всі відділи, включно з архівними (для звітів за минулі місяці)
 app.get('/api/departments/all', requireAuth, async (req, res) => {
   try {
-    const rows = await q('SELECT * FROM departments ORDER BY id');
+    let rows;
+    try {
+      rows = await q('SELECT * FROM departments ORDER BY COALESCE(sort_order, id)');
+    } catch (e) {
+      rows = await q('SELECT * FROM departments ORDER BY id');
+    }
     const restricted = await getRestrictedDeptCodes();
     res.json(rows.filter(r => canSeeDept(req.user, r.code, restricted)));
   }
