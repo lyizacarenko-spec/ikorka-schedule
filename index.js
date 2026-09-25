@@ -310,7 +310,9 @@ function canSeeDept(user, deptCode, restrictedSet) {
 async function getRestrictedDeptCodes() {
   try {
     const rows = await q(`SELECT code FROM departments WHERE restricted = true`);
-    return new Set(rows.map(r => r.code));
+    const set = new Set(rows.map(r => r.code));
+    restrictedDeptCodesCache = set;
+    return set;
   } catch (e) { return new Set(); }
 }
 
@@ -333,12 +335,31 @@ async function requireFinance(req, res, next) {
 
 // Чи має користувач доступ до ЗП цього відділу.
 // ВАЖЛИВО: графіки доступні ВСІМ авторизованим — dept_codes обмежує лише ЗП.
-function canDept(user, code) {
+function canDept(user, code, restrictedSet) {
   if (!user) return false;
   if (!user.can_salary) return false;    // немає права на ЗП взагалі
-  if (!user.depts) return true;          // null = всі відділи
+  // ізоляція філії Вінниця — та сама логіка, що й canSeeDept (графік),
+  // але для доступу до ЗП. restrictedSet передається викликами, де він
+  // уже під рукою; якщо ні — підвантажуємо через кеш нижче.
+  const rs = restrictedSet || restrictedDeptCodesCache || new Set();
+  const isRestricted = rs.has(code);
+  if (user.vinnitsaOnly) {
+    if (!isRestricted) return false;
+    return !!(user.restrictedDepts && user.restrictedDepts.includes(code));
+  }
+  if (isRestricted) {
+    return !!(user.restrictedDepts && user.restrictedDepts.includes(code));
+  }
+  if (!user.depts) return true;          // null = всі (не-restricted) відділи
   return user.depts.includes(code);
 }
+
+// Простий синхронний кеш restricted-кодів для canDept у місцях, де немає
+// можливості зробити await перед викликом (рідкісні синхронні шляхи).
+// Оновлюється при кожному getRestrictedDeptCodes(); порожній до першого
+// виклику — тоді canDept поводиться як раніше (нічого не приховує зайво,
+// бо isRestricted буде false для всіх кодів, доки кеш не наповниться).
+let restrictedDeptCodesCache = new Set();
 
 // ── ВХІД ──
 app.post('/api/login', async (req, res) => {
@@ -3386,8 +3407,14 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     const { year, month, dept } = req.query;
     const y = parseInt(year || new Date().getFullYear());
     const m = parseInt(month || new Date().getMonth() + 1);
+    const restrictedSet = await getRestrictedDeptCodes();
     // якщо в юзера обмежений список відділів — не даємо запросити чужий dept напряму
     if (req.user.depts && dept && !req.user.depts.includes(dept)) {
+      return res.status(403).json({ error: 'Немає доступу до цього відділу' });
+    }
+    // ізоляція філії Вінниця — не даємо запросити vin_* dept без доступу,
+    // і навпаки не даємо vinnitsaOnly-акаунту запросити відділ Дніпра
+    if (dept && !canDept(req.user, dept, restrictedSet) && !(req.user.only_employee_id)) {
       return res.status(403).json({ error: 'Немає доступу до цього відділу' });
     }
     let rows = await computeFinanceRows(y, m, dept);
@@ -3408,6 +3435,10 @@ app.get('/api/finance', requireFinance, async (req, res) => {
     if (req.user.depts) {
       rows = rows.filter(r => req.user.depts.includes(r.dept_code));
     }
+    // ізоляція філії Вінниця у зведеному (без dept) запиті: приховуємо
+    // vin_* рядки від усіх, крім явно дозволених; vinnitsaOnly-акаунтам —
+    // навпаки, приховуємо все, крім vin_*.
+    rows = rows.filter(r => canDept({ ...req.user, can_salary: true }, r.dept_code, restrictedSet));
     // тим, кому дозволено бачити ЗП лише ОДНОГО конкретного співробітника
     // (напр. керівник з доступом до мотивації лише свого підлеглого) —
     // не показуємо весь відділ, тільки цей рядок.
