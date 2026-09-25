@@ -273,7 +273,45 @@ async function getUser(req) {
   if (!rows.length) return null;
   const u = rows[0];
   u.depts = u.dept_codes ? u.dept_codes.split(',').map(x => x.trim()).filter(Boolean) : null;
+  // restrictedDepts — коди "закритих" відділів (departments.restricted=true),
+  // які саме ЦЕЙ користувач МОЖЕ бачити в графіку (напр. філія Вінниця).
+  // Порожньо/NULL = не бачить жодного закритого відділу (типовий випадок).
+  // На відміну від depts (dept_codes) — це не про доступ до ЗП, а про те,
+  // чи взагалі показувати відділ у графіку/списку співробітників.
+  u.restrictedDepts = u.restricted_dept_codes
+    ? u.restricted_dept_codes.split(',').map(x => x.trim()).filter(Boolean)
+    : [];
+  // vinnitsaOnly — акаунти, що належать самій філії Вінниця: бачать ЛИШЕ
+  // свої (restricted) відділи і НІКОЛИ звичайні відділи Дніпра. Симетрично
+  // до restrictedDepts (Дніпро-керівництво -> бачить ще й Вінницю), тут —
+  // Вінниця -> не бачить нічого, крім Вінниці.
+  u.vinnitsaOnly = !!u.vinnitsa_only;
   return u;
+}
+
+// Чи бачить користувач цей КОД відділу в графіку (не в ЗП — це canDept).
+// Звичайні (не позначені restricted) відділи бачать усі авторизовані —
+// так було завжди. Позначені restricted (напр. філія Вінниця) бачить лише
+// той, у кого код відділу є в restrictedDepts. Акаунти самої філії
+// (vinnitsaOnly=true) — виняток: бачать ТІЛЬКИ свої restricted-відділи і
+// НІЧОГО зі звичайних (Дніпро) відділів.
+function canSeeDept(user, deptCode, restrictedSet) {
+  const isRestricted = restrictedSet.has(deptCode);
+  if (user && user.vinnitsaOnly) {
+    return isRestricted && !!(user.restrictedDepts && user.restrictedDepts.includes(deptCode));
+  }
+  if (!isRestricted) return true;
+  return !!(user && user.restrictedDepts && user.restrictedDepts.includes(deptCode));
+}
+
+// Коди відділів, позначених "закритими" (departments.restricted=true).
+// Якщо колонку restricted ще не додано в БД (міграція не виконана) —
+// падаємо в порожню множину, тобто нічого не приховуємо (як і було).
+async function getRestrictedDeptCodes() {
+  try {
+    const rows = await q(`SELECT code FROM departments WHERE restricted = true`);
+    return new Set(rows.map(r => r.code));
+  } catch (e) { return new Set(); }
 }
 
 // middleware: вимагає входу
@@ -422,23 +460,29 @@ app.patch('/api/users/:id', async (req, res) => {
 app.get('/health', (_, res) => res.json({ ok: true }));
 
 // ── DEPARTMENTS ──────────────────────────────────────────────
-app.get('/api/departments', async (_, res) => {
+app.get('/api/departments', requireAuth, async (req, res) => {
   try {
-    res.json(await q(`SELECT * FROM departments
+    const rows = await q(`SELECT * FROM departments
                       WHERE COALESCE(is_active, true) = true
-                      ORDER BY id`));
+                      ORDER BY id`);
+    const restricted = await getRestrictedDeptCodes();
+    res.json(rows.filter(r => canSeeDept(req.user, r.code, restricted)));
   }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // всі відділи, включно з архівними (для звітів за минулі місяці)
-app.get('/api/departments/all', async (_, res) => {
-  try { res.json(await q('SELECT * FROM departments ORDER BY id')); }
+app.get('/api/departments/all', requireAuth, async (req, res) => {
+  try {
+    const rows = await q('SELECT * FROM departments ORDER BY id');
+    const restricted = await getRestrictedDeptCodes();
+    res.json(rows.filter(r => canSeeDept(req.user, r.code, restricted)));
+  }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── EMPLOYEES ────────────────────────────────────────────────
-app.get('/api/employees', async (req, res) => {
+app.get('/api/employees', requireAuth, async (req, res) => {
   try {
     const { dept, include_month } = req.query;
     // Дата, відносно якої визначаємо "ефективний" відділ (для людей з
@@ -481,12 +525,14 @@ app.get('/api/employees', async (req, res) => {
     if (dept) { sql += ` AND ${effDeptCode} = $${params.length+1}`; params.push(dept); }
     if (dept) { sql += ` AND d.code = $${params.length+1}`; params.push(dept); }
     sql += ' ORDER BY d.id, COALESCE(e.sort_order, 999999), e.name';
-    res.json(await q(sql, params));
+    const rows = await q(sql, params);
+    const restricted = await getRestrictedDeptCodes();
+    res.json(rows.filter(r => canSeeDept(req.user, r.dept_code, restricted)));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET archived employees
-app.get('/api/employees/archived', async (req, res) => {
+app.get('/api/employees/archived', requireAuth, async (req, res) => {
   try {
     const { dept } = req.query;
     let sql = `SELECT e.*, d.name AS dept_name, d.code AS dept_code
@@ -495,7 +541,9 @@ app.get('/api/employees/archived', async (req, res) => {
     const params = [];
     if (dept) { sql += ` AND d.code = $1`; params.push(dept); }
     sql += ' ORDER BY d.id, e.name';
-    res.json(await q(sql, params));
+    const rows = await q(sql, params);
+    const restricted = await getRestrictedDeptCodes();
+    res.json(rows.filter(r => canSeeDept(req.user, r.dept_code, restricted)));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -543,13 +591,17 @@ app.put('/api/employees/reorder', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 // ── SCHEDULE ─────────────────────────────────────────────────
-app.get('/api/schedule', async (req, res) => {
+app.get('/api/schedule', requireAuth, async (req, res) => {
   try {
     const { year, month, dept } = req.query;
     const y = parseInt(year  || new Date().getFullYear());
     const m = parseInt(month || new Date().getMonth() + 1);
     const start = `${y}-${String(m).padStart(2,'0')}-01`;
     const end   = new Date(y, m, 0).toISOString().slice(0,10);
+    const restricted = await getRestrictedDeptCodes();
+    if (dept && restricted.has(dept) && !canSeeDept(req.user, dept, restricted)) {
+      return res.status(403).json({ error: 'Немає доступу до цього відділу' });
+    }
     let sql = `SELECT se.*, e.name AS emp_name, e.level, e.role,
                       d.code AS dept_code, d.name AS dept_name
                FROM schedule_entries se
@@ -559,11 +611,12 @@ app.get('/api/schedule', async (req, res) => {
     const params = [start, end];
     if (dept) { sql += ` AND d.code = $3`; params.push(dept); }
     sql += ' ORDER BY d.id, e.name, se.entry_date';
-    res.json(await q(sql, params));
+    const rows = await q(sql, params);
+    res.json(dept ? rows : rows.filter(r => canSeeDept(req.user, r.dept_code, restricted)));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/schedule', async (req, res) => {
+app.put('/api/schedule', requireAuth, async (req, res) => {
   try {
     const { employee_id, entry_date, status, note, updated_by } = req.body;
     const rows = await q(
@@ -578,7 +631,7 @@ app.put('/api/schedule', async (req, res) => {
 });
 
 // BULK — масове заповнення графіка (одним запитом)
-app.put('/api/schedule/bulk', async (req, res) => {
+app.put('/api/schedule/bulk', requireAuth, async (req, res) => {
   try {
     const { entries } = req.body;
     if (!Array.isArray(entries) || !entries.length) return res.json({ ok: true, count: 0 });
