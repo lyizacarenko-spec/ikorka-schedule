@@ -2112,8 +2112,10 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
     day_price: dayPrice,
     target_days: targetDays,
     worked_days: worked,
-    diff_days: diff,
-    day_adjust: dayAdjust,
+    // флет-оклад — day_adjust/diff_days не впливають на суму, тож у
+    // деталізації/breakdown теж не показуємо "Переробку"/"Недопрацьовано"
+    diff_days: isFlatOklad ? 0 : diff,
+    day_adjust: isFlatOklad ? 0 : dayAdjust,
     adj_total: adjTotal,
     adjustments: adjList,
     total,
