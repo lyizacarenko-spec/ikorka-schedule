@@ -432,7 +432,8 @@ app.get('/api/users', async (req, res) => {
     const u = await getUser(req);
     if (!u || u.role !== 'owner') return res.status(403).json({ error: 'Тільки для власника' });
     res.json(await q(`SELECT id, login, full_name, role, dept_codes, can_finance, can_salary,
-                             only_employee_id, is_active, last_login FROM app_users ORDER BY id`));
+                             only_employee_id, is_active, last_login,
+                             restricted_dept_codes, vinnitsa_only FROM app_users ORDER BY id`));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -440,12 +441,15 @@ app.post('/api/users', async (req, res) => {
   try {
     const u = await getUser(req);
     if (!u || u.role !== 'owner') return res.status(403).json({ error: 'Тільки для власника' });
-    const { login, password, full_name, role, dept_codes, can_finance, can_salary, only_employee_id } = req.body;
+    const { login, password, full_name, role, dept_codes, can_finance, can_salary, only_employee_id,
+            restricted_dept_codes, vinnitsa_only } = req.body;
     const rows = await q(
-      `INSERT INTO app_users (login, pass_hash, full_name, role, dept_codes, can_finance, can_salary, only_employee_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, login, full_name, role`,
+      `INSERT INTO app_users (login, pass_hash, full_name, role, dept_codes, can_finance, can_salary, only_employee_id,
+                               restricted_dept_codes, vinnitsa_only)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, login, full_name, role`,
       [login, sha256(password), full_name, role || 'schedule', dept_codes || null,
-       !!can_finance, !!can_salary, only_employee_id || null]);
+       !!can_finance, !!can_salary, only_employee_id || null,
+       restricted_dept_codes || null, !!vinnitsa_only]);
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -464,17 +468,21 @@ app.patch('/api/users/:id', async (req, res) => {
   try {
     const u = await getUser(req);
     if (!u || u.role !== 'owner') return res.status(403).json({ error: 'Тільки для власника' });
-    const { password, full_name, role, dept_codes, can_finance, can_salary, only_employee_id, is_active } = req.body;
+    const { password, full_name, role, dept_codes, can_finance, can_salary, only_employee_id, is_active,
+            restricted_dept_codes, vinnitsa_only } = req.body;
     if (password) await q(`UPDATE app_users SET pass_hash=$1 WHERE id=$2`, [sha256(password), req.params.id]);
     const rows = await q(
       `UPDATE app_users SET
          full_name=COALESCE($1,full_name), role=COALESCE($2,role),
          dept_codes=$3, can_finance=COALESCE($4,can_finance),
          can_salary=COALESCE($5,can_salary), only_employee_id=$6,
-         is_active=COALESCE($7,is_active)
-       WHERE id=$8 RETURNING id, login, full_name, role, dept_codes, can_finance, can_salary, is_active`,
+         is_active=COALESCE($7,is_active),
+         restricted_dept_codes=$9, vinnitsa_only=COALESCE($10,vinnitsa_only)
+       WHERE id=$8 RETURNING id, login, full_name, role, dept_codes, can_finance, can_salary, is_active,
+                              restricted_dept_codes, vinnitsa_only`,
       [full_name, role, dept_codes || null, can_finance, can_salary,
-       only_employee_id || null, is_active, req.params.id]);
+       only_employee_id || null, is_active, req.params.id,
+       restricted_dept_codes || null, typeof vinnitsa_only === 'boolean' ? vinnitsa_only : null]);
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
