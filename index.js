@@ -2042,9 +2042,15 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
   // Персональний виняток: СБ (id=206) отримує всю ЗП одним платежем 1-го числа,
   // без поділу на аванс 15-го і залишок 1-го наст.
   const SINGLE_PAYOUT_IDS = [206];                   // ціна дня завжди /22
+  // Персональний виняток: філія Вінниця — Усачов Сергій (Склад, id=234) і
+  // Усачов Артем (Керівник, id=236) отримують ПОВНИЙ оклад щомісяця незалежно
+  // від кількості відпрацьованих днів (без утримань за пропуски, без різниці
+  // між 31 і 25 робочими днями місяця), включно з першим (неповним) місяцем.
+  const FLAT_OKLAD_NO_PRORATION_IDS = [234, 236];
+  const isFlatOklad = !!(employeeId && FLAT_OKLAD_NO_PRORATION_IDS.includes(employeeId));
   // Новачок-ставочник: прийнятий у цьому місяці → платимо ЗА ВІДПРАЦЬОВАНІ ДНІ,
   // а не «оклад мінус пропуски» (інакше виходить занижена сума).
-  const isNewStaff = isFirstMonthByStartDate(startDate, y, m);
+  const isNewStaff = !isFlatOklad && isFirstMonthByStartDate(startDate, y, m);
 
   // еталон днів
   const targetDays = normType === 'month_workdays'
@@ -2062,10 +2068,13 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
   const adjList = adjustments || [];
   const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
 
-  // Новачок → відпрацьовані дні × ціна дня. Решта → оклад ± різниця днів.
-  const total = isNewStaff
-    ? (worked * dayPrice + adjTotal)
-    : (base + dayAdjust + adjTotal);
+  // Новачок → відпрацьовані дні × ціна дня. Флет-оклад → завжди повна ставка.
+  // Решта → оклад ± різниця днів.
+  const total = isFlatOklad
+    ? (base + adjTotal)
+    : isNewStaff
+      ? (worked * dayPrice + adjTotal)
+      : (base + dayAdjust + adjTotal);
   // Ставочники (адмінка, логістика, бухгалтерія, навчання, керівництво):
   //   Виплата 1 = АВАНС (15-те число поточного місяця) = половина окладу
   //   Виплата 2 = залишок ставки + допки (1-ше число наступного місяця)
