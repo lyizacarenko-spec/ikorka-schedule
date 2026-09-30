@@ -1655,6 +1655,23 @@ function isWorkStatus(status) {
   return /^\d{1,2}(:\d{2})?-\d{1,2}(:\d{2})?$/.test(status || '');   // довільний час "9-17", "10:15-18:30" тощо
 }
 
+// Автогенерація циклу 2/2 для логістів з 1 жовтня 2026: 2 дні "9-21",
+// 2 дні "вих", по колу. PHASE — зсув конкретного співробітника у 4-денному
+// циклі відносно ANCHOR (0 = працює з першого дня циклу, 2 = навпаки, щоб
+// завжди хтось один був на зміні). Повертає null, якщо співробітник не на
+// цій схемі (тоді діє звичайний дефолт "9-21" без авто-вих).
+const SHIFT22_ANCHOR = '2026-10-01';
+const SHIFT22_PHASE = { 'Зайченко Олена': 0, 'Ільєнкова Ольга': 2 };
+function shift22Status(empName, dateStr) {
+  const phase = SHIFT22_PHASE[empName];
+  if (phase == null || !dateStr) return null;
+  const anchor = new Date(SHIFT22_ANCHOR + 'T00:00:00Z');
+  const d = new Date(dateStr + 'T00:00:00Z');
+  const daysDiff = Math.round((d - anchor) / 86400000);
+  const pos = ((daysDiff + phase) % 4 + 4) % 4;
+  return pos < 2 ? '9-21' : 'вих';
+}
+
 // Дефолтний статус за кодом відділу і днем тижня (дзеркало фронтенду).
 // dateStr — дата запису (YYYY-MM-DD), потрібна для дато-залежних дефолтів
 // (напр. новий графік складу з 1 жовтня 2026).
@@ -1670,10 +1687,16 @@ function defaultStatusFor(deptCode, dow, empName, dateStr) {
     return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
   if (deptCode === 'warehouse') return (dateStr && dateStr >= '2026-10-01') ? '9:00-18:30' : '9-19';
-  // логісти: з 1 жовтня 2026 — графік 2/2, зміна 9:00-21:00, без авто-вих
-  // (вихідні за графіком 2/2 не прив'язані до днів тижня — люди ставлять
-  // "вих" собі самі вручну; до цієї дати — стара логіка, будні 8:30-16:30, нд вих).
-  if (deptCode === 'logistics') return (dateStr && dateStr >= '2026-10-01') ? '9-21' : (dow === 0 ? 'вих' : '8:30-16:30');
+  // логісти: з 1 жовтня 2026 — графік 2/2, зміна 9:00-21:00. Для співробітників
+  // з відомою фазою циклу (SHIFT22_PHASE) — цикл генерується автоматично;
+  // для решти — просто "9-21" щодня, вихідні ставлять собі вручну.
+  if (deptCode === 'logistics') {
+    if (dateStr && dateStr >= SHIFT22_ANCHOR) {
+      const auto = shift22Status(empName, dateStr);
+      return auto || '9-21';
+    }
+    return dow === 0 ? 'вих' : '8:30-16:30';
+  }
   if (['management','training','admin','marketing','it'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
   return '10-18';
 }
