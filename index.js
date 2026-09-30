@@ -27,6 +27,11 @@ const ORDER_DEPTS = ['refuse','reactivation'];
 // відділу rzpk. Місяці ДО цієї дати рахуються за старими формулами
 // (як і раніше — жодних змін заднім числом).
 const RZPK_NEW_SCHEMES_CUTOVER_YM = '2026-09';
+// Склад: до цього місяця відрядна/годинна частина (piece_warehouse,
+// hourly_fixed, фасовка warehouse_hybrid) виплачувалась ОКРЕМО щотижня
+// (таблиця "Склад по тижнях", видалена). З цього місяця й далі вона
+// ділиться на ті самі 2 виплати, що й фікс (1-15 -> 15-те, 16-кінець -> 1-ше).
+const WAREHOUSE_BIWEEKLY_CUTOVER_YM = '2026-10';
 
 // ═══════════════════════════════════════════════════════════
 // РЗПК РОЗДРІБ — менеджер (заміна percent_plan з вересня 2026)
@@ -2882,21 +2887,32 @@ async function computeFinanceRows(y, m, dept) {
         // фікс-частина: computeFixedRate з базою base_rate, norm_type='fixed' (норма 22)
         const monthEntries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
         const fixScheme = { base_rate: emp.base_rate, norm_days: emp.norm_days || 22, norm_type: emp.norm_type || 'fixed' };
-const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date, emp.id); // корегування додаємо нижче окремо        // фасовка за місяць (тільки скло/пластик)
+        const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date, emp.id); // корегування додаємо нижче окремо
+        // фасовка за місяць (тільки скло/пластик), розбита на 2 половини місяця
+        // (1-15 та 16-кінець) — з жовтня 2026 фасовка більше НЕ виплачується
+        // окремо щотижня, а входить у ті самі 2 виплати, що й фікс.
         const list = whByEmp[emp.id] || [];
-        let fasTotal = 0, fasDays = 0;
-        list.forEach(r => { const a = fasovkaDayAmount(r); if (a > 0) { fasTotal += a; fasDays += 1; } });
+        let fasTotal = 0, fasDays = 0, fasTotal1 = 0, fasTotal2 = 0;
+        list.forEach(r => {
+          const a = fasovkaDayAmount(r);
+          if (a > 0) {
+            fasTotal += a; fasDays += 1;
+            const dd = parseInt(String(r.work_date).slice(8, 10));
+            if (dd <= 15) fasTotal1 += a; else fasTotal2 += a;
+          }
+        });
         // корегування
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
-        // total = фікс(±дні) + фасовка + корегування (інформаційна сума за місяць)
+        // total = фікс(±дні) + фасовка + корегування
         const base = parseFloat(emp.base_rate) || 0;
         const total = fixCalc.total + fasTotal + adjTotal;
-        // виплати: ставка виплачується 2 РАЗИ НА МІСЯЦЬ (15-те + 1-ше наст.),
-        // фасовка — ОКРЕМО ЩОТИЖНЯ (див. "Склад по тижнях"), тому в ці дві
-        // виплати вона НЕ входить — інакше подвійний облік (тиждень + місяць)
-        const payout1 = base / 2;                         // аванс 15-го — половина окладу
-        const payout2 = fixCalc.total - payout1 + adjTotal; // залишок ставки (±переробка) + корегування, БЕЗ фасовки
+        // виплати: до WAREHOUSE_BIWEEKLY_CUTOVER_YM фасовка виплачувалась
+        // окремо щотижня (стара "Склад по тижнях"), тому НЕ входила в ці 2
+        // виплати. З цього місяця — входить, розбита по половинах місяця.
+        const useWhBiweekly = curYm >= WAREHOUSE_BIWEEKLY_CUTOVER_YM;
+        const payout1 = useWhBiweekly ? (base / 2 + fasTotal1) : (base / 2);
+        const payout2 = useWhBiweekly ? (total - payout1) : (fixCalc.total - payout1 + adjTotal);
         return {
           employee_id: emp.id, name: emp.name,
           dept_code: emp.dept_code, dept_name: emp.dept_name,
@@ -2918,17 +2934,25 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
           advance: payout1, remainder: payout2,
         };
       }
-      // склад-відрядник: сума за днями
+      // склад-відрядник: сума за днями, з жовтня 2026 — 2 виплати на місяць
+      // (1-15 → 15-те, 16-кінець → 1-ше наст.), як у офісу, замість щотижневих
       if (emp.scheme_type === 'piece_warehouse') {
         const list = whByEmp[emp.id] || [];
-        let whTotal = 0, packTotal = 0, fasTotal = 0, exitTotal = 0;
+        let whTotal = 0, packTotal = 0, fasTotal = 0, exitTotal = 0, period1Total = 0, period2Total = 0;
         list.forEach(r => {
           const a = warehouseDayAmount(r);
           whTotal += a.total; packTotal += a.pack; fasTotal += a.fasovka; exitTotal += a.exit;
+          const dd = parseInt(String(r.work_date).slice(8, 10));
+          if (dd <= 15) period1Total += a.total; else period2Total += a.total;
         });
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
         const total = whTotal + adjTotal;
+        // до WAREHOUSE_BIWEEKLY_CUTOVER_YM виплачувалось окремо щотижня
+        // (стара "Склад по тижнях"), тому тут advance:0/remainder:total.
+        const useWhBiweekly = curYm >= WAREHOUSE_BIWEEKLY_CUTOVER_YM;
+        const payout1 = useWhBiweekly ? period1Total : 0;   // 15-те: сума за 1-15 число
+        const payout2 = useWhBiweekly ? (total - payout1) : total; // 1-ше наст.: сума за 16-кінець + корегування
         return {
           employee_id: emp.id, name: emp.name,
           dept_code: emp.dept_code, dept_name: emp.dept_name,
@@ -2938,7 +2962,9 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
           piece_total: whTotal,
           pack_total: packTotal, fas_total: fasTotal, exit_total: exitTotal,
           adj_total: adjTotal, adjustments: adjList,
-          total, advance: 0, remainder: total,
+          total, payout1, payout2,
+          pay_schedule: 'staff',
+          advance: payout1, remainder: payout2,
         };
       }
       // вантажник: години × ставка (ПОДЕННО, з урахуванням rate_change_date
@@ -3162,24 +3188,33 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
       }
       // вантажник з фіксом: 5000 завжди (незалежно від графіка) + години × ставка
       // (ПОДЕННО, з урахуванням rate_change_date всередині місяця — так само,
-      // як для звичайної 'hourly'; fixed_amount на дні НЕ ділиться)
+      // як для звичайної 'hourly'; fixed_amount на дні НЕ ділиться).
+      // Годинна частина ЗАВЖДИ виплачується окремо через таблицю
+      // "Склад по тижнях" (не тут) — в payout1/payout2 головної таблиці
+      // йде ЛИШЕ фікс (+ ручні коригування), щоб не було подвійного обліку.
       if (emp.scheme_type === 'hourly_fixed') {
         const rate = parseFloat(emp.raw_base_rate) || 150;
         const fixedAmount = fixedAmountForMonth(y, m, emp.fixed_amount, emp.raw_prev_fixed_amount, emp.raw_fixed_amount_change_date);
         const list = hrByEmp[emp.id] || [];
-        let hours = 0, hourPay = 0;
+        let hours = 0, hourPay = 0, hourPay1 = 0, hourPay2 = 0;
         list.forEach(r => {
           const h = parseFloat(r.hours) || 0;
           const dateStr = ymd(r.work_date);
           const dayRate = hourlyRateForDay(emp.raw_base_rate, emp.raw_prev_base_rate, emp.raw_rate_change_date, dateStr);
+          const pay = h * dayRate;
           hours += h;
-          hourPay += h * dayRate;
+          hourPay += pay;
+          const dd = parseInt(dateStr.slice(8, 10));
+          if (dd <= 15) hourPay1 += pay; else hourPay2 += pay;
         });
         const adjList2 = adjByEmp[emp.id] || [];
         const adjTotal2 = adjList2.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        // total2 — інформаційна сума (фікс + години), для довідки в розбивці;
+        // сама годинна частина ("hourPay") НЕ входить у payout1b/payout2b —
+        // вона виплачується окремо, через "Склад по тижнях".
         const total2 = fixedAmount + hourPay + adjTotal2;
         const payout1b = fixedAmount / 2;
-        const payout2b = total2 - payout1b;
+        const payout2b = fixedAmount - payout1b + adjTotal2;
         return {
           employee_id: emp.id, name: emp.name,
           dept_code: emp.dept_code, dept_name: emp.dept_name,
@@ -3602,7 +3637,10 @@ app.get('/api/finance', requireFinance, async (req, res) => {
 });
 
 // GET /api/finance/warehouse-weeks?year=&month=
-// Понедільна розбивка складу (пн-нд, тижні обриваються кінцем місяця).
+// Понедільна розбивка годинної частини вантажників з фіксом (hourly_fixed) —
+// ЛИШЕ hourly_fixed: фікс цих людей уже виплачується у головній таблиці
+// Фінансів (2 рази на місяць), а от години й далі рахуються та виплачуються
+// окремо, потижнево, тут (пн-нд, тижні обриваються кінцем місяця).
 // Дата виплати = наступний понеділок після кінця тижня.
 app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
   try {
@@ -3626,25 +3664,12 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
       d = endDay + 1;
     }
 
-    // склад-співробітники (piece_warehouse + hourly + hourly_fixed + warehouse_hybrid)
-    // разом з raw prev_base_rate/rate_change_date — потрібно для поденного
-    // розрахунку ставки вантажників (hourly/hourly_fixed), якщо ставка
-    // змінюється всередині місяця (аналогічно computeFinanceRows).
     const start = `${y}-${String(m).padStart(2,'0')}-01`;
     const end   = `${y}-${String(m).padStart(2,'0')}-${String(daysInMonth).padStart(2,'0')}`;
 
-    // окрім тих, у кого схема ЗАРАЗ склад-відрядна/гібрид/погодинна, беремо
-    // ще й тих, у кого схема ПОМІНЯЛАСЬ на щось інше (напр. на оклад) САМЕ
-    // ВСЕРЕДИНІ цього місяця — інакше дні ДО дати переходу (коли людина ще
-    // фактично пакувала/фасувала) зникають з тижневого звіту заднім числом.
-    // Довбня Наталья (id=160) вже давно переведена на fixed_rate НАПРЯМУ в
-    // БД (scheme_type='fixed_rate', prev_scheme_type/scheme_type_change_date
-    // так і лишились NULL — той самий механізм, що для Шквіри, тут просто не
-    // застосований), тому дата-орієнтована CASE нижче її не бачить. Але вона
-    // й далі фактично здає фасовку (є записи у warehouse_daily) — тому
-    // ловимо її явним винятком, а не переробляємо її схему в БД (щоб не
-    // зачепити вже порахований/позначений виплаченим підсумок у "Фінансах").
-    const WAREHOUSE_HYBRID_FALLBACK_IDS = [160];
+    // тільки hourly_fixed — включаючи тих, у кого схема ПОМІНЯЛАСЬ на щось
+    // інше САМЕ ВСЕРЕДИНІ цього місяця (щоб дні до дати переходу не зникали
+    // заднім числом), аналогічно computeFinanceRows.
     const emps = await q(
       `SELECT e.id, e.name, s.scheme_type, s.base_rate, s.prev_base_rate, s.rate_change_date,
               s.prev_scheme_type, s.scheme_type_change_date
@@ -3652,56 +3677,29 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
        JOIN salary_schemes s ON s.employee_id = e.id
        WHERE e.is_active = true
          AND (
-           -- ефективна схема на ВЕСЬ місяць (як у computeFinanceRows): якщо
-           -- дата переходу ще не настала до кінця місяця — рахуємо стару
-           -- схему (охоплює й випадок "перехід стоїть з наступного місяця",
-           -- коли він коректно записаний через scheme_type_change_date).
            (CASE WHEN s.scheme_type_change_date IS NOT NULL AND $2 < s.scheme_type_change_date
-                 THEN s.prev_scheme_type ELSE s.scheme_type END)
-             IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid')
-           -- + перехід САМЕ ВСЕРЕДИНІ цього місяця (напр. Шквіра: 15.09) —
-           -- дні до дати переходу все одно рахувались за старою схемою.
+                 THEN s.prev_scheme_type ELSE s.scheme_type END) = 'hourly_fixed'
            OR (s.scheme_type_change_date BETWEEN $1 AND $2
-               AND s.prev_scheme_type IN ('piece_warehouse','hourly','hourly_fixed','warehouse_hybrid'))
-           -- + явний виняток (див. коментар вище)
-           OR e.id = ANY($3)
+               AND s.prev_scheme_type = 'hourly_fixed')
          )
-       ORDER BY e.name`, [start, end, WAREHOUSE_HYBRID_FALLBACK_IDS]);
-    // мапа схем для правильного підрахунку (гібрид рахує ТІЛЬКИ фасовку у тижнях)
-    // — для тих, у кого дата переходу ще не настала (весь місяць) або настала
-    // ВСЕРЕДИНІ місяця, використовуємо ПОПЕРЕДНЮ схему (саме за нею рахувались
-    // дні до дати переходу).
+       ORDER BY e.name`, [start, end]);
     const schemeById = {};
     emps.forEach(e => {
-      if (WAREHOUSE_HYBRID_FALLBACK_IDS.includes(e.id)) { schemeById[e.id] = 'warehouse_hybrid'; return; }
       const cd = ymd(e.scheme_type_change_date);
       const wholeMonthBeforeChange = cd && end < cd;
-      const midMonthChange = cd && cd >= start && cd <= end
-        && ['piece_warehouse','hourly','hourly_fixed','warehouse_hybrid'].includes(e.scheme_type) === false;
+      const midMonthChange = cd && cd >= start && cd <= end && e.scheme_type !== 'hourly_fixed';
       const usesPrev = wholeMonthBeforeChange || midMonthChange;
       schemeById[e.id] = usesPrev ? e.prev_scheme_type : e.scheme_type;
     });
-    const wh = await q(`SELECT * FROM warehouse_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
     const hr = await q(`SELECT * FROM hourly_daily WHERE work_date BETWEEN $1 AND $2`, [start, end]);
 
     // компоненти суми по співробітнику по днях (щоб і сума, і деталізація
     // рахувались з тих самих чисел — сума в тижні не зміниться)
-    const dayComp = {}; // "empId_day" -> {pack,fasovka,exit,hourPay,hours}
+    const dayComp = {}; // "empId_day" -> {hourPay,hours}
     const addComp = (key, patch) => {
-      const c = dayComp[key] = dayComp[key] || { pack: 0, fasovka: 0, exit: 0, hourPay: 0, hours: 0 };
+      const c = dayComp[key] = dayComp[key] || { hourPay: 0, hours: 0 };
       Object.keys(patch).forEach(k => { c[k] += patch[k]; });
     };
-    wh.forEach(r => {
-      const day = parseInt(String(r.work_date).slice(8,10));
-      const key = `${r.employee_id}_${day}`;
-      // для гібрида (начальник складу) — лише фасовка; для відрядників — повна сума дня
-      if (schemeById[r.employee_id] === 'warehouse_hybrid') {
-        addComp(key, { pack: 0, fasovka: fasovkaDayAmount(r), exit: 0, hourPay: 0, hours: 0 });
-      } else {
-        const calc = warehouseDayAmount(r);
-        addComp(key, { pack: calc.pack, fasovka: calc.fasovka, exit: calc.exit, hourPay: 0, hours: 0 });
-      }
-    });
     hr.forEach(r => {
       const emp = emps.find(e => e.id === r.employee_id);
       const dateStr = ymd(r.work_date);
@@ -3709,7 +3707,7 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
       const day = parseInt(String(r.work_date).slice(8,10));
       const key = `${r.employee_id}_${day}`;
       const hours = parseFloat(r.hours)||0;
-      addComp(key, { pack: 0, fasovka: 0, exit: 0, hourPay: hours*rate, hours });
+      addComp(key, { hourPay: hours*rate, hours });
     });
 
     const fmt = dd => `${String(dd).padStart(2,'0')}.${String(m).padStart(2,'0')}`;
@@ -3746,29 +3744,20 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     const buildBreakdownWeek = (scheme, comp) => {
       const items = [];
       const push = (label, amt) => { if (amt) items.push({ label, amount: Math.round(amt*100)/100 }); };
-      if (scheme === 'piece_warehouse') {
-        push('Упаковка', comp.pack);
-        push('Фасовка', comp.fasovka);
-        push('Вихід', comp.exit);
-      } else if (scheme === 'warehouse_hybrid') {
-        push('Фасовка', comp.fasovka);
-      } else if (scheme === 'hourly' || scheme === 'hourly_fixed') {
-        push(`Години × ставка (${comp.hours}г)`, comp.hourPay);
-      }
+      push(`Години × ставка (${comp.hours}г)`, comp.hourPay);
       return items;
     };
 
     const weekRows = weeks.map(w => {
       const pdIso = payDateIso(w.endDay);
       const perEmp = emps.map(e => {
-        const comp = { pack: 0, fasovka: 0, exit: 0, hourPay: 0, hours: 0 };
+        const comp = { hourPay: 0, hours: 0 };
         for (let dd = w.startDay; dd <= w.endDay; dd++) {
           const c = dayComp[`${e.id}_${dd}`];
           if (!c) continue;
-          comp.pack += c.pack; comp.fasovka += c.fasovka; comp.exit += c.exit;
           comp.hourPay += c.hourPay; comp.hours += c.hours;
         }
-        const sum = comp.pack + comp.fasovka + comp.exit + comp.hourPay;
+        const sum = comp.hourPay;
         const key = `${e.id}_${pdIso}`;
         const override = overrideMap[key] != null ? overrideMap[key] : null;
         return {
@@ -3802,9 +3791,10 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
 });
 
 // PUT /api/finance/warehouse-payout-status  { employee_id, pay_date, paid }
-// Галочка «виплачено» для складу, прив'язана до конкретної дати виплати
-// (наступний понеділок після тижня), а не до calc_year/calc_month/payout_no
-// як у основного payout_status — тижні складу не мапляться 1:1 на місяці.
+// Галочка «виплачено» для годинної частини hourly_fixed, прив'язана до
+// конкретної дати виплати (наступний понеділок після тижня), а не до
+// calc_year/calc_month/payout_no як у основного payout_status — тижні не
+// мапляться 1:1 на місяці.
 app.put('/api/finance/warehouse-payout-status', requireFinance, async (req, res) => {
   try {
     const { employee_id, pay_date } = req.body;
