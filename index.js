@@ -3675,29 +3675,18 @@ app.get('/api/finance', requireFinance, async (req, res) => {
 });
 
 // GET /api/finance/warehouse-weeks?year=&month=
-// Понедільна розбивка складу (пн-нд, тижні обриваються кінцем місяця).
-// Дата виплати = наступний понеділок після кінця тижня.
+// Розбивка складу на 2 періоди на місяць (1-15 та 16-кінець) — як у
+// головній таблиці Фінансів. Дата виплати: 1-15 → 15-те цього місяця,
+// 16-кінець → 1-ше наступного місяця.
 app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
   try {
     const y = parseInt(req.query.year || new Date().getFullYear());
     const m = parseInt(req.query.month || new Date().getMonth() + 1);
     const daysInMonth = new Date(y, m, 0).getDate();
 
-    // нарізка на тижні пн-нд у межах місяця
-    const weeks = [];
-    let d = 1;
-    while (d <= daysInMonth) {
-      const startDay = d;
-      // знайти найближчу неділю (dow=0) або кінець місяця
-      let endDay = d;
-      while (endDay < daysInMonth) {
-        const dow = new Date(y, m - 1, endDay).getDay();
-        if (dow === 0) break;         // неділя — кінець тижня
-        endDay++;
-      }
-      weeks.push({ startDay, endDay });
-      d = endDay + 1;
-    }
+    // нарізка на 2 періоди на місяць: 1-15 та 16-кінець
+    const weeks = [{ startDay: 1, endDay: Math.min(15, daysInMonth) }];
+    if (daysInMonth > 15) weeks.push({ startDay: 16, endDay: daysInMonth });
 
     // склад-співробітники (piece_warehouse + hourly + hourly_fixed + warehouse_hybrid)
     // разом з raw prev_base_rate/rate_change_date — потрібно для поденного
@@ -3787,11 +3776,8 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
 
     const fmt = dd => `${String(dd).padStart(2,'0')}.${String(m).padStart(2,'0')}`;
     const payDateObj = endDay => {
-      // наступний понеділок після endDay
-      let dt = new Date(y, m - 1, endDay);
-      dt.setDate(dt.getDate() + 1);
-      while (dt.getDay() !== 1) dt.setDate(dt.getDate() + 1);
-      return dt;
+      // 1-15 → виплата 15-го цього місяця; 16-кінець → виплата 1-го наступного
+      return endDay <= 15 ? new Date(y, m - 1, 15) : new Date(y, m, 1);
     };
     const payDate = endDay => {
       const dt = payDateObj(endDay);
@@ -3876,8 +3862,8 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
 
 // PUT /api/finance/warehouse-payout-status  { employee_id, pay_date, paid }
 // Галочка «виплачено» для складу, прив'язана до конкретної дати виплати
-// (наступний понеділок після тижня), а не до calc_year/calc_month/payout_no
-// як у основного payout_status — тижні складу не мапляться 1:1 на місяці.
+// (15-те або 1-ше наступного місяця), а не до calc_year/calc_month/payout_no
+// як у основного payout_status.
 app.put('/api/finance/warehouse-payout-status', requireFinance, async (req, res) => {
   try {
     const { employee_id, pay_date } = req.body;
