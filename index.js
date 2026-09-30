@@ -1086,6 +1086,7 @@ app.post('/api/export/salary', async (req, res) => {
       fixed_rate: 'Ставочник', mentor: 'Наставник', recruiter: 'Рекрутер',
       hourly: 'Вантажник (год.)', hourly_fixed: 'Вантажник (фікс+год.)',
       piece_warehouse: 'Склад-відрядник', warehouse_hybrid: 'Начальник складу',
+      shift_rate: 'Позмінна оплата (2/2)',
       hot: 'Гарячі продажі', rop: 'РОП', percent_plan: 'Продажі (% плану)',
       orders_count: 'Відмови (к-сть замовлень)', hot_cold: 'Холодка (гарячі)',
     };
@@ -1648,7 +1649,7 @@ app.put('/api/hourly/daily', async (req, res) => {
 // Відпрацьована зміна = робочий статус (10-18, 8:30-16:30, удаленка, запізн, відробіт…).
 // вих / больн / відпуск / навч — НЕ зміни.
 // ═══════════════════════════════════════════════════════════
-const WORK_STATUSES = ['10-18','11-18','10-17','9:30-17:30','9-17','9-18','9-19','9-19:30','8:30-16:30','удаленка','запізн','відробіт'];
+const WORK_STATUSES = ['10-18','11-18','10-17','9:30-17:30','9-17','9-18','9-19','9-19:30','8:30-16:30','9-21','удаленка','запізн','відробіт'];
 function isWorkStatus(status) {
   if (WORK_STATUSES.includes(status)) return true;
   return /^\d{1,2}(:\d{2})?-\d{1,2}(:\d{2})?$/.test(status || '');   // довільний час "9-17", "10:15-18:30" тощо
@@ -1669,7 +1670,10 @@ function defaultStatusFor(deptCode, dow, empName, dateStr) {
     return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
   if (deptCode === 'warehouse') return (dateStr && dateStr >= '2026-10-01') ? '9:00-18:30' : '9-19';
-  if (deptCode === 'logistics') return dow === 0 ? 'вих' : '8:30-16:30';
+  // логісти: з 1 жовтня 2026 — графік 2/2, зміна 9:00-21:00, без авто-вих
+  // (вихідні за графіком 2/2 не прив'язані до днів тижня — люди ставлять
+  // "вих" собі самі вручну; до цієї дати — стара логіка, будні 8:30-16:30, нд вих).
+  if (deptCode === 'logistics') return (dateStr && dateStr >= '2026-10-01') ? '9-21' : (dow === 0 ? 'вих' : '8:30-16:30');
   if (['management','training','admin','marketing','it'].includes(deptCode) && (dow === 0 || dow === 6)) return 'вих';
   return '10-18';
 }
@@ -2196,6 +2200,9 @@ function buildBreakdown(r) {
     case 'hourly_fixed':
       push('Фікс', r.fixed_amount);
       push('Години × ставка', r.hour_pay);
+      break;
+    case 'shift_rate':
+      push('Ставка за зміни', r.shift_pay);
       break;
     case 'hot': {
       const p1 = r.period1 || {}, p2 = r.period2 || {};
@@ -3201,6 +3208,40 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
           total: total2, payout1: payout1b, payout2: payout2b,
           pay_schedule: 'staff',
           advance: payout1b, remainder: payout2b,
+        };
+      }
+      // позмінна оплата (логісти на графіку 2/2 з 10.2026): ставка за ОДНУ
+      // фактично відпрацьовану зміну (будь-який робочий статус з графіка),
+      // без окладу/норми днів — скільки змін у графіку, стільки й множиться
+      // на ставку. Дні відпочинку (2/2) люди ставлять собі самі вручну.
+      // 2 виплати на місяць, як у решти персоналу (1-15 → 15-те, 16-кінець → 1-ше наст.).
+      if (emp.scheme_type === 'shift_rate') {
+        const rate = parseFloat(emp.base_rate) || 0;
+        const entries = buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date);
+        let shifts = 0, shifts1 = 0, shifts2 = 0;
+        entries.forEach(e => {
+          if (!isWorkStatus(e.status)) return;
+          shifts += 1;
+          const dd = parseInt(String(e.entry_date).slice(8, 10));
+          if (dd <= 15) shifts1 += 1; else shifts2 += 1;
+        });
+        const adjList = adjByEmp[emp.id] || [];
+        const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+        const shiftPay = shifts * rate;
+        const total = shiftPay + adjTotal;
+        const payout1 = shifts1 * rate;
+        const payout2 = total - payout1;
+        return {
+          employee_id: emp.id, name: emp.name,
+          dept_code: emp.dept_code, dept_name: emp.dept_name,
+          role: emp.role, level: emp.level,
+          scheme_type: 'shift_rate',
+          base_rate: rate, worked_days: shifts, diff_days: 0,
+          shift_pay: shiftPay,
+          adj_total: adjTotal, adjustments: adjList,
+          total, payout1, payout2,
+          pay_schedule: 'staff',
+          advance: payout1, remainder: payout2,
         };
       }
       const scheme = { base_rate: emp.base_rate, norm_days: emp.norm_days, norm_type: emp.norm_type };
