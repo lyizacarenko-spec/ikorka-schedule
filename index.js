@@ -29,49 +29,126 @@ const ORDER_DEPTS = ['refuse','reactivation'];
 const RZPK_NEW_SCHEMES_CUTOVER_YM = '2026-09';
 
 // ═══════════════════════════════════════════════════════════
-// РЗПК РОЗДРІБ — менеджер (заміна percent_plan з вересня 2026)
-// Оклад 20000 (пропорційно дням) + бонус за показники (до 6000) +
-// бонус за виконання плану (4000-10000) - штраф за повернення понад 6%.
+// РЗПК РОЗДРІБ — менеджер
+// До 10.2026: стара формула (оклад 20000 + бонус за показники до 6000 +
+// бонус за план 4000-10000 - штраф за повернення понад 6% × 1.5% факту).
+// З 10.2026: грейдова система (Джун/Мідл/Топ) — база 15000/20000/25000,
+// бонус1 за показники (за грейдом), бонус2 за % виконання плану (за
+// грейдом, без стелі з 121% — фіксована сума + 4% від суми перевищення
+// понад поріг 121%), штраф за повернення = % перевищення понад 6% від
+// суми (бонус1+бонус2). Перший місяць роботи (будь-коли) — фіксована
+// ставка 20000, без прив'язки до грейду.
+// Доплата за переробіток (чинна з вересня 2026, тобто з усіх місяців,
+// де взагалі викликається ця функція): +800 грн за кожен відпрацьований
+// день понад 22 — потрапляє у виплату 15-го (payout2/remainder), бо
+// аванс (payout1) — це фіксовано 50% від базової ставки.
 // ═══════════════════════════════════════════════════════════
-function computeRetailV2Salary(salRow, workedGraph) {
+const RZPK_RETAIL_GRADE_CUTOVER_YM = '2026-10';
+const OVERTIME_DAY_BONUS = 800;
+const RETAIL_GRADE_BASE = { jun: 15000, mid: 20000, top: 25000 };
+const RETAIL_BONUS1_TABLE = {
+  jun: [0, 1500, 3000, 4500],
+  mid: [0, 2000, 4000, 6000],
+  top: [0, 2500, 5000, 7500],
+};
+const RETAIL_BONUS2_TABLE = {
+  jun: [[70, 79, 1500], [80, 89, 3500], [90, 99, 5500], [100, 109, 7500], [110, 120, 10500]],
+  mid: [[80, 89, 3500], [90, 99, 6500], [100, 109, 10500], [110, 120, 15000]],
+  top: [[80, 89, 3000], [90, 99, 6000], [100, 109, 10000], [110, 120, 18000]],
+};
+const RETAIL_BONUS2_AT_121 = { jun: 14500, mid: 23000, top: 30500 };
+
+function retailBonus2ForGrade(grade, pct, plan, fact) {
+  const g = RETAIL_GRADE_BASE[grade] ? grade : 'jun';
+  if (pct >= 121) {
+    const base121 = RETAIL_BONUS2_AT_121[g] || 0;
+    const threshold = 1.21 * plan;
+    const excess = Math.max(0, fact - threshold);
+    return Math.round((base121 + excess * 0.04) * 100) / 100;
+  }
+  const tiers = RETAIL_BONUS2_TABLE[g] || [];
+  for (const [lo, hi, amt] of tiers) {
+    if (pct >= lo && pct <= hi) return amt;
+  }
+  return 0;
+}
+
+function computeRetailV2Salary(salRow, workedGraph, opts) {
   const s = salRow || {};
+  const o = opts || {};
   const targetDays = 22;
   const worked = workedGraph != null ? workedGraph : (parseInt(s.worked_days) || 0);
-  const base = worked >= targetDays ? 20000 : Math.round(20000 * worked / targetDays);
+  const overtimeDays = Math.max(0, worked - targetDays);
+  const overtimeBonus = overtimeDays * OVERTIME_DAY_BONUS;
 
   const avgCheckOk = !!s.avg_check_ok;
   const callsOk = !!s.calls_ok;
   const approvalOk = !!s.approval_ok;
-  const bonus1 = (avgCheckOk ? 2000 : 0) + (callsOk ? 2000 : 0) + (approvalOk ? 2000 : 0);
+  const indicatorsCount = (avgCheckOk ? 1 : 0) + (callsOk ? 1 : 0) + (approvalOk ? 1 : 0);
 
   const plan = parseFloat(s.plan_amount) || 0;
   const fact = parseFloat(s.fact_amount) || 0;
   const pct = plan > 0 ? (fact / plan * 100) : 0;
 
-  let bonus2 = 0;
-  if (pct >= 121) bonus2 = 10000;
-  else if (pct >= 110) bonus2 = 5000;
-  else if (pct >= 100) bonus2 = 5000;
-  else if (pct >= 90) bonus2 = 4000;
-  else if (pct >= 80) bonus2 = 4000;
+  const curYm = o.curYm || '';
+  const useGradeScheme = curYm >= RZPK_RETAIL_GRADE_CUTOVER_YM;
+  const isFirstMonth = !!o.isFirstMonth;
+
+  let base, bonus1, bonus2, schemeLabel, grade;
+
+  if (!useGradeScheme) {
+    // стара формула — чинна до жовтня 2026, без змін
+    base = worked >= targetDays ? 20000 : Math.round(20000 * worked / targetDays);
+    bonus1 = (avgCheckOk ? 2000 : 0) + (callsOk ? 2000 : 0) + (approvalOk ? 2000 : 0);
+    let b2 = 0;
+    if (pct >= 121) b2 = 10000;
+    else if (pct >= 110) b2 = 5000;
+    else if (pct >= 100) b2 = 5000;
+    else if (pct >= 90) b2 = 4000;
+    else if (pct >= 80) b2 = 4000;
+    bonus2 = b2;
+    schemeLabel = 'retail_v2_legacy';
+    grade = null;
+  } else if (isFirstMonth) {
+    // 1-й місяць роботи — фіксована ставка 20000, без грейду;
+    // показники/план рахуємо за найнижчою (Джун) шкалою — спрощений період адаптації
+    base = worked >= targetDays ? 20000 : Math.round(20000 * worked / targetDays);
+    grade = 'jun';
+    bonus1 = RETAIL_BONUS1_TABLE.jun[indicatorsCount] || 0;
+    bonus2 = retailBonus2ForGrade('jun', pct, plan, fact);
+    schemeLabel = 'retail_v2_newcomer';
+  } else {
+    grade = ['jun', 'mid', 'top'].includes(o.level) ? o.level : 'jun';
+    const gradeBase = RETAIL_GRADE_BASE[grade];
+    base = worked >= targetDays ? gradeBase : Math.round(gradeBase * worked / targetDays);
+    bonus1 = RETAIL_BONUS1_TABLE[grade][indicatorsCount] || 0;
+    bonus2 = retailBonus2ForGrade(grade, pct, plan, fact);
+    schemeLabel = 'retail_v2_grade';
+  }
 
   const returnsPct = parseFloat(s.returns_pct) || 0;
   const retExcess = Math.max(0, returnsPct - 6);
-  const overage = fact * retExcess / 100;
-  const returnPenalty = Math.round(overage * 0.015 * 100) / 100;
+  let returnPenalty;
+  if (!useGradeScheme) {
+    const overage = fact * retExcess / 100;
+    returnPenalty = Math.round(overage * 0.015 * 100) / 100;
+  } else {
+    returnPenalty = Math.round((bonus1 + bonus2) * retExcess / 100 * 100) / 100;
+  }
 
   const bonusManual = parseFloat(s.bonus_manual) || 0;
   const manualPenalty = parseFloat(s.penalty) || 0;
 
-  const total = base + bonus1 + bonus2 - returnPenalty - manualPenalty + bonusManual;
+  const total = base + bonus1 + bonus2 - returnPenalty - manualPenalty + bonusManual + overtimeBonus;
 
-  let payout1 = 10000;
+  let payout1 = Math.round(base / 2);
   if (payout1 > total) payout1 = Math.max(0, total);
   const payout2 = Math.max(0, total - payout1);
 
   return {
-    scheme_type: 'retail_v2', base_rate: base, worked_days: worked, target_days: targetDays,
-    avg_check_ok: avgCheckOk, calls_ok: callsOk, approval_ok: approvalOk, bonus1,
+    scheme_type: schemeLabel, grade, base_rate: base, worked_days: worked, target_days: targetDays,
+    overtime_days: overtimeDays, overtime_bonus: overtimeBonus,
+    avg_check_ok: avgCheckOk, calls_ok: callsOk, approval_ok: approvalOk, indicators_count: indicatorsCount, bonus1,
     plan, fact, pct: Math.round(pct * 10) / 10, bonus2,
     returns_pct: returnsPct, return_penalty: returnPenalty,
     bonus_manual: bonusManual, penalty: manualPenalty,
@@ -156,7 +233,10 @@ function computeMoManagerSalary(row, workedGraph) {
 
   const bonusManual = parseFloat(r.bonus_manual) || 0;
   const penalty = parseFloat(r.penalty) || 0;
-  const total = base + marginBonus + clientBonus + bonusManual - penalty;
+  // доплата за переробіток (з вересня 2026): +800 грн за кожен день понад 22
+  const overtimeDays = Math.max(0, worked - 22);
+  const overtimeBonus = overtimeDays * OVERTIME_DAY_BONUS;
+  const total = base + marginBonus + clientBonus + bonusManual - penalty + overtimeBonus;
   let payout1 = Math.round(base / 2);
   if (payout1 > total) payout1 = Math.max(0, total);
   const payout2 = Math.max(0, total - payout1);
@@ -165,6 +245,7 @@ function computeMoManagerSalary(row, workedGraph) {
     margin_amount: marginAmt, margin_pct: marginPct, margin_bonus_pct: marginBonusPct, margin_bonus: marginBonus,
     gate_margin: gateMargin, discipline_ok: disciplineOk,
     new_clients_count: newClients, per_client: perClient, client_bonus: clientBonus,
+    overtime_days: overtimeDays, overtime_bonus: overtimeBonus,
     bonus_manual: bonusManual, penalty, total, payout1, payout2,
     pay_schedule: 'sales', advance: payout1, remainder: payout2,
   };
@@ -200,7 +281,10 @@ function computeB2bManagerSalary(row, workedGraph) {
 
   const bonusManual = parseFloat(r.bonus_manual) || 0;
   const penalty = parseFloat(r.penalty) || 0;
-  const total = base + marginBonus + turnoverBonus + resBonus + bonusManual - penalty;
+  // доплата за переробіток (з вересня 2026): +800 грн за кожен день понад 22
+  const overtimeDays = Math.max(0, worked - 22);
+  const overtimeBonus = overtimeDays * OVERTIME_DAY_BONUS;
+  const total = base + marginBonus + turnoverBonus + resBonus + bonusManual - penalty + overtimeBonus;
   let payout1 = Math.round(base / 2);
   if (payout1 > total) payout1 = Math.max(0, total);
   const payout2 = Math.max(0, total - payout1);
@@ -210,6 +294,7 @@ function computeB2bManagerSalary(row, workedGraph) {
     gate_margin: gateMargin, discipline_ok: disciplineOk,
     reseller_turnover: turnover, turnover_bonus: turnoverBonus,
     new_resellers_count: newRes, per_reseller: perRes, reseller_bonus: resBonus,
+    overtime_days: overtimeDays, overtime_bonus: overtimeBonus,
     bonus_manual: bonusManual, penalty, total, payout1, payout2,
     pay_schedule: 'sales', advance: payout1, remainder: payout2,
   };
@@ -3055,7 +3140,11 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         } else if (emp.team === 'Ресейл' && !['rop','head','teamlead'].includes(emp.role)) {
           calc = computeB2bManagerSalary(b2bManagerByEmp[emp.id], workedGraphNew);
         } else if (emp.team === 'Роздріб' && !['rop','head','teamlead'].includes(emp.role)) {
-          calc = computeRetailV2Salary(salByEmp[emp.id], workedGraphNew);
+          calc = computeRetailV2Salary(salByEmp[emp.id], workedGraphNew, {
+            level: emp.level,
+            curYm,
+            isFirstMonth: isFirstMonthByStartDate(emp.start_date, y, m),
+          });
         }
         if (calc) {
           calc.total += adjTotal;
