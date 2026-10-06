@@ -1682,7 +1682,7 @@ function defaultStatusFor(deptCode, dow, empName, dateStr) {
     if (dow === 4 || dow === 5) return 'удаленка';   // чт, пт
     return '10-18';                                   // пн, вт, ср
   }
-  if (empName === 'Люлченко Артем' && (dow === 0 || dow === 6)) return 'вих';
+  if (empName === 'Люльченко Артем' && (dow === 0 || dow === 6)) return 'вих';
   if (deptCode === 'admin' && empName === 'Мединська Ірина')
     return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
@@ -3346,12 +3346,21 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
 // щоб не змішувати з гарячою ЗП і з ЗП штатних rzpk-менеджерів.
 // ═══════════════════════════════════════════════════════════
 async function computeHotColdRows(y, m) {
+  // effDeptCode — так само, як у computeFinanceRows: якщо місяць, що рахуємо,
+  // передує dept_transfer_date співробітника, його відділ на той момент був
+  // prev_department_id, а НЕ поточний department_id. Без цього людина, що
+  // перейшла в "гарячу" з 1-го числа іншого місяця, помилково потрапляла б
+  // у список "холодки" й за ті місяці, коли вона ще була в РЗПК.
+  const end = new Date(y, m, 0).toISOString().slice(0, 10);
+  const effDeptCode = `(CASE WHEN e.dept_transfer_date IS NOT NULL AND $1 < e.dept_transfer_date THEN pd.code ELSE d.code END)`;
   const hotMgrs = await q(
     `SELECT e.id, e.name FROM employees e
      JOIN departments d ON d.id = e.department_id
-     WHERE d.code = 'hot' AND e.is_active = true
+     LEFT JOIN departments pd ON pd.id = e.prev_department_id
+     WHERE ${effDeptCode} = 'hot' AND e.is_active = true
        AND e.role NOT IN ('rop','head','teamlead')
-     ORDER BY e.name`
+     ORDER BY e.name`,
+    [end]
   );
   if (!hotMgrs.length) return [];
 
