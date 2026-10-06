@@ -655,7 +655,17 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     if (dept) { sql += ` AND ${effDeptCode} = $${params.length+1}`; params.push(dept); }
     if (dept) { sql += ` AND d.code = $${params.length+1}`; params.push(dept); }
     sql += ' ORDER BY d.id, COALESCE(e.sort_order, 999999), e.name';
-    const rows = await q(sql, params);
+    let rows = await q(sql, params);
+    // звільнений (fired_date) — видимий до місяця звільнення ВКЛЮЧНО,
+    // з наступного місяця приховується (навіть якщо is_active ще не
+    // перемкнули на false) — та сама логіка, що й у Фінансах
+    if (include_month) {
+      rows = rows.filter(r => {
+        if (!r.fired_date) return true;
+        const firedYm = (r.fired_date.toISOString ? r.fired_date.toISOString() : String(r.fired_date)).slice(0, 7);
+        return firedYm >= include_month;
+      });
+    }
     const restricted = await getRestrictedDeptCodes();
     res.json(rows.filter(r => canSeeDept(req.user, r.dept_code, restricted)));
   } catch (e) { res.status(500).json({ error: e.message }); }
