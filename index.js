@@ -440,6 +440,27 @@ function canDept(user, code, restrictedSet) {
   return user.depts.includes(code);
 }
 
+// Ефективний відділ співробітника на кінець місяця calc_year/calc_month —
+// та сама логіка, що в GET /api/employees (dept_transfer_date/prev_department_id):
+// до дати переведення людина належить СТАРОМУ відділу. Потрібно для перевірки
+// прав на ЗП за минулий місяць — інакше керівник старого відділу не може
+// редагувати дані за період, коли людина ще була в нього (після переведення
+// канонічний e.department_id вже вказує на новий відділ).
+async function effectiveDeptCode(employeeId, calcYear, calcMonth) {
+  const y = parseInt(calcYear), m = parseInt(calcMonth);
+  const refEnd = (y && m)
+    ? new Date(y, m, 0).toISOString().slice(0, 10)
+    : new Date().toISOString().slice(0, 10);
+  const rows = await q(
+    `SELECT (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date
+                  THEN COALESCE(pd.code, d.code) ELSE d.code END) AS code
+     FROM employees e
+     JOIN departments d ON d.id = e.department_id
+     LEFT JOIN departments pd ON pd.id = e.prev_department_id
+     WHERE e.id = $1`, [employeeId, refEnd]);
+  return rows.length ? rows[0].code : null;
+}
+
 // Простий синхронний кеш restricted-кодів для canDept у місцях, де немає
 // можливості зробити await перед викликом (рідкісні синхронні шляхи).
 // Оновлюється при кожному getRestrictedDeptCodes(); порожній до першого
@@ -924,8 +945,13 @@ app.get('/api/stats', async (req, res) => {
       WHERE e.is_active = true
         AND e.role NOT IN ('rop','head','teamlead')
         AND e.level != 'new'
+        -- звільнені до початку місяця не входять в план (is_active могли не
+        -- перемкнути) — та сама логіка, що в GET /api/employees і Фінансах
+        AND NOT (COALESCE((SELECT MAX(se.entry_date) FROM schedule_entries se
+                           WHERE se.employee_id = e.id AND se.status = '-'),
+                          DATE '9999-12-31') < $1::date)
       GROUP BY d.id, d.code, e.level, e.team
-    `);
+    `, [start]);
 
     const plans = await q(`
       SELECT * FROM level_plans
@@ -1022,8 +1048,10 @@ app.put('/api/salary', requireAuth, async (req, res) => {
     const { employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual, avg_check_ok, calls_ok, approval_ok } = req.body;
     // перевірка прав: ЗП можна вводити лише своїм відділам
     if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
-    const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
-    if (empRow.length && !canDept(req.user, empRow[0].code))
+    // права — по ефективному відділу НА ЦЕЙ МІСЯЦЬ (а не поточному): людину могли
+    // перевести в інший відділ уже після того, як за неї вводять минулий місяць
+    const effCode = await effectiveDeptCode(employee_id, calc_year, calc_month);
+    if (effCode && !canDept(req.user, effCode))
       return res.status(403).json({ error: 'Немає доступу до цього відділу' });
     if (req.user.only_employee_id && req.user.only_employee_id !== parseInt(employee_id))
       return res.status(403).json({ error: 'Немає доступу до цього співробітника' });
