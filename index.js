@@ -2962,7 +2962,11 @@ async function computeFinanceRows(y, m, dept) {
     try {
       revRows = await q(
         `SELECT employee_id, SUM(amount) AS total FROM daily_revenue_detail
-         WHERE revenue_date BETWEEN $1 AND $2 GROUP BY employee_id`, [start, end]);
+         WHERE revenue_date BETWEEN $1 AND $2
+           -- суми, підтягнуті з Odoo (source='odoo'), у ЗП НЕ йдуть — лише
+           -- в план/факт відділу. ЗП рахується тільки з ручних даних.
+           AND COALESCE(source, 'manual') <> 'odoo'
+         GROUP BY employee_id`, [start, end]);
     } catch (e) { revRows = []; }
     const revByEmp = {};
     revRows.forEach(r => { revByEmp[r.employee_id] = parseFloat(r.total) || 0; });
