@@ -839,10 +839,10 @@ app.put('/api/revenue/detail', async (req, res) => {
   try {
     const { employee_id, revenue_date, amount, note } = req.body;
     const rows = await q(
-      `INSERT INTO daily_revenue_detail (employee_id, revenue_date, amount, note, updated_at)
-       VALUES ($1,$2,$3,$4,NOW())
+      `INSERT INTO daily_revenue_detail (employee_id, revenue_date, amount, note, source, updated_at)
+       VALUES ($1,$2,$3,$4,'manual',NOW())
        ON CONFLICT (employee_id, revenue_date)
-       DO UPDATE SET amount=$3, note=$4, updated_at=NOW() RETURNING *`,
+       DO UPDATE SET amount=$3, note=$4, source='manual', updated_at=NOW() RETURNING *`,
       [employee_id, revenue_date, amount, note||null]
     );
     res.json(rows[0]);
@@ -4135,4 +4135,7 @@ app.get('/api/finance/average', requireFinance, async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+// ── ODOO → ГРАФІК (автофакт продажів) ──
+require('./odoo-sync').mount(app, { q, requireAuth });
+
 app.listen(PORT, () => console.log(`✅ Schedule API on port ${PORT}`));
