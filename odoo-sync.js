@@ -218,12 +218,13 @@ async function syncRange(q, dateFrom, dateTo, { overwrite = false, trigger = 'ma
   }
 }
 
-// Період для автосинхронізації: з 1-го числа поточного місяця (а в перші 3 дні
-// місяця — з 1-го числа попереднього, щоб дотягнути пізні підтвердження) по сьогодні.
+// Період для автосинхронізації: з 1-го числа поточного місяця по сьогодні, а з 1-го
+// по 15-те число — ще й увесь попередній місяць: до 15-го докидають повернення
+// (лід переходить у стадію повернення → замовлення випадає з факту, як у дашборді).
 function autoPeriod() {
   const today = todayKyiv();
   const [y, m, d] = today.split('-').map(Number);
-  const from = d <= 3
+  const from = d <= 15
     ? new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 10)
     : `${y}-${String(m).padStart(2, '0')}-01`;
   return { from, to: today };
@@ -288,7 +289,12 @@ async function suggestMatches(q) {
     SELECT e.id, e.name, e.odoo_user_id, e.is_active, d.code AS dept_code, d.name AS dept_name
     FROM employees e JOIN departments d ON d.id = e.department_id
     WHERE d.code = ANY($1) AND e.is_active = true
-    ORDER BY d.id, e.name`, [Object.keys(DEPT_RULES)]);
+      -- звільнені (статус '-' у графіку) до початку поточного місяця не
+      -- показуються — та сама логіка, що в GET /api/employees і /api/stats
+      AND NOT (COALESCE((SELECT MAX(se.entry_date) FROM schedule_entries se
+                         WHERE se.employee_id = e.id AND se.status = '-'),
+                        DATE '9999-12-31') < $2::date)
+    ORDER BY d.id, e.name`, [Object.keys(DEPT_RULES), todayKyiv().slice(0, 8) + '01']);
   const [users, sales] = await Promise.all([odooUsers(), recentSalesCount().catch(() => new Map())]);
   const byId = new Map(users.map(u => [u.id, u]));
   return emps.map(e => {
