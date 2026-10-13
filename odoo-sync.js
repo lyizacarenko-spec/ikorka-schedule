@@ -230,25 +230,58 @@ function autoPeriod() {
 }
 
 // ── Підбір відповідності «співробітник графіка ↔ користувач Odoo» ──
+// Нормалізація ПІБ: латинські «двійники» → кирилиця, і/ї/и/ы → и, є/е/э/ё → е,
+// без апострофів і м'якого знака — щоб «Шелковникова»=«Шелковнікова»,
+// «Віолетта»=«Виолетта», «Cвиридова» (лат. C)=«Свиридова».
+const LAT2CYR = { a: 'а', c: 'с', e: 'е', i: 'і', k: 'к', m: 'м', o: 'о', p: 'р', t: 'т', x: 'х', y: 'у', b: 'в', h: 'н' };
 function normName(s) {
   return String(s || '').toLowerCase()
-    .replace(/[ʼ'’`]/g, '').replace(/ё/g, 'е').replace(/[^a-zа-яіїєґ\s-]/g, ' ')
+    .replace(/[a-z]/g, ch => LAT2CYR[ch] || ch)
+    .replace(/[ʼ'’′`ь]/g, '')
+    .replace(/[іїиы]/g, 'и').replace(/[єеэё]/g, 'е')
+    .replace(/[^а-яґ\s-]/g, ' ')
     .split(/\s+/).filter(Boolean);
 }
-// Схожість: збіг прізвища + імені в будь-якому порядку (по-батькові ігнорується)
+function lev(a, b) {
+  if (Math.abs(a.length - b.length) > 1) return 2;
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return dp[a.length][b.length];
+}
+// 3 — прізвище й ім'я збігаються; 2 — прізвище (з точністю до 1 літери) +
+// ім'я з тих самих 2 перших літер («Оля»/«Ольга», «Данило»/«Даниил»);
+// 1 — лише прізвище («Ганна»/«Анна») — тільки підказка, без автоприв'язки.
+// Основний порядок — «Прізвище Ім'я» з обох боків. Якщо в одному з імен слова
+// переставлені («Анна Почтовик»), рахується лише повний збіг (3) — інакше
+// однакові імена («Анастасія», «Вероніка») давали б хибних кандидатів.
+// По батькові ігнорується.
 function nameScore(a, b) {
   const A = normName(a), B = normName(b);
-  if (!A.length || !B.length) return 0;
-  const a2 = A.slice(0, 2), b2 = B.slice(0, 2);
-  const hit = a2.filter(t => b2.includes(t)).length;
-  if (hit === 2) return 2;
-  // «Оля» vs «Ольга», «Саша» vs «Олександр» — збіг хоча б прізвища: кандидат,
-  // але НЕ автоприв'язка (вибирає людина)
-  if (hit === 1) return 1;
+  if (A.length < 2 || B.length < 2) return 0;
+  const [as, af] = A, [bs, bf] = B;
+  if (as === bs && af === bf) return 3;
+  if (as === bf && af === bs) return 3;            // переставлені слова
+  const sFuzzy = as === bs || (as.length >= 5 && lev(as, bs) <= 1);
+  if (!sFuzzy) return 0;
+  if (af.slice(0, 2) === bf.slice(0, 2)) return 2;
+  if (as === bs) return 1;
   return 0;
 }
 async function odooUsers() {
   return call('res.users', 'search_read', [[['share', '=', false]]], { fields: ['name', 'login', 'active'], context: { active_test: false } });
+}
+// Кількість підтверджених замовлень по продавцях за ~2 місяці — щоб серед
+// тезок/дублікатів акаунтів вибрати того, хто реально продає.
+async function recentSalesCount() {
+  const from = kyivDayStartUtc(addDays(todayKyiv(), -60));
+  const g = await call('sale.order', 'read_group',
+    [[['state', '=', 'sale'], ['team_id', 'in', [5, 6, 10, 11]], ['date_order', '>=', from]], ['user_id'], ['user_id']],
+    { lazy: false });
+  const m = new Map();
+  for (const r of g || []) if (r.user_id) m.set(r.user_id[0], r.__count || 0);
+  return m;
 }
 async function suggestMatches(q) {
   const emps = await q(`
@@ -256,29 +289,39 @@ async function suggestMatches(q) {
     FROM employees e JOIN departments d ON d.id = e.department_id
     WHERE d.code = ANY($1) AND e.is_active = true
     ORDER BY d.id, e.name`, [Object.keys(DEPT_RULES)]);
-  const users = await odooUsers();
+  const [users, sales] = await Promise.all([odooUsers(), recentSalesCount().catch(() => new Map())]);
   const byId = new Map(users.map(u => [u.id, u]));
   return emps.map(e => {
-    const cands = users.map(u => ({ id: u.id, name: u.name, active: u.active, score: nameScore(e.name, u.name) }))
-      .filter(c => c.score > 0).sort((a, b) => b.score - a.score || (b.active - a.active));
+    const cands = users
+      .map(u => ({ id: u.id, name: u.name, active: u.active, sales: sales.get(u.id) || 0, score: nameScore(e.name, u.name) }))
+      .filter(c => c.score > 0)
+      .sort((a, b) => b.score - a.score || b.sales - a.sales || (b.active - a.active));
     const linked = e.odoo_user_id ? byId.get(e.odoo_user_id) : null;
     return {
       employee_id: e.id, name: e.name, dept: e.dept_name,
       odoo_user_id: e.odoo_user_id, odoo_user_name: linked ? linked.name : null,
-      candidates: cands.slice(0, 5),
+      candidates: cands.slice(0, 6),
     };
   });
 }
-// Автоприв'язка лише однозначних збігів (рівно один кандидат з повним збігом)
+// Вибір для автоприв'язки: серед кандидатів з балом ≥2 — єдиний, хто має
+// продажі; якщо продажів нема ні в кого — єдиний кандидат з балом ≥2.
+function pickAuto(cands) {
+  const good = cands.filter(c => c.score >= 2);
+  const selling = good.filter(c => c.sales > 0);
+  if (selling.length === 1) return selling[0];
+  if (selling.length === 0 && good.length === 1) return good[0];
+  return null;
+}
 async function autoLink(q) {
   const rows = await suggestMatches(q);
   const linked = [], ambiguous = [], notFound = [];
   for (const r of rows) {
     if (r.odoo_user_id) continue;
-    const exact = r.candidates.filter(c => c.score === 2 && c.active);
-    if (exact.length === 1) {
-      await q(`UPDATE employees SET odoo_user_id=$1 WHERE id=$2`, [exact[0].id, r.employee_id]);
-      linked.push({ name: r.name, odoo: exact[0].name });
+    const pick = pickAuto(r.candidates);
+    if (pick) {
+      await q(`UPDATE employees SET odoo_user_id=$1 WHERE id=$2`, [pick.id, r.employee_id]);
+      linked.push({ name: r.name, odoo: pick.name });
     } else if (r.candidates.length) ambiguous.push({ name: r.name, candidates: r.candidates });
     else notFound.push(r.name);
   }
@@ -346,4 +389,4 @@ function mount(app, { q, requireAuth }) {
   }
 }
 
-module.exports = { mount, syncRange, autoPeriod, kyivDay, kyivDayStartUtc, nameScore, DEPT_RULES, isConfigured };
+module.exports = { mount, syncRange, autoPeriod, kyivDay, kyivDayStartUtc, nameScore, pickAuto, DEPT_RULES, isConfigured };
