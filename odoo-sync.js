@@ -35,7 +35,12 @@ const HOT_RULE = {
     ['opportunity_id.ikorka_additional_discount', 'not ilike', 'Паста_299'],
   ],
 };
+// Філія Вінниця (vin_op): менеджери з міткою «Вінниця» в Odoo продають у тих
+// самих командах і з тих самих джерел, що РЗПК — правило те саме, але окремий
+// запит/підсумок, щоб у журналі синхронізації Вінниця йшла окремим рядком.
+const VIN_RULE = { ...RZPK_RULE, label: 'Вінниця' };
 const DEPT_RULES = {
+  vin_op: VIN_RULE,
   rzpk: RZPK_RULE,
   retail: RZPK_RULE,
   wholesale: RZPK_RULE,
@@ -337,7 +342,7 @@ async function autoLink(q) {
 //   Факт оборот = «Сумма» (замовлення 4 джерел, без стадій 8,9,10,11,24)
 //   % повернень = «Заказов Возврат» / «Кол-во заказов» × 100
 //                 (повернення = стадії ліда 20,21,22; дата = date_order)
-const RZPK_DEPTS = ['rzpk', 'retail', 'wholesale', 'resellers'];
+const RZPK_DEPTS = ['rzpk', 'retail', 'wholesale', 'resellers', 'vin_op'];
 async function salaryFacts(q, employeeId, year, month, effectiveDeptCode) {
   if (!isConfigured()) throw new Error('Odoo не підключено');
   const y = parseInt(year), m = parseInt(month);
