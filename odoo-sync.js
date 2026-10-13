@@ -331,8 +331,46 @@ async function autoLink(q) {
   return { linked, ambiguous, notFound };
 }
 
+// ── Дані для картки ЗП (кнопка «Підтягнути з Odoo») ─────────
+// Лише ПОКАЗУЄ цифри — у salary_calc нічого не пише. Зберігає РОП сам.
+// Логіка = дашборд «Відділ РЗПК › Загальний»:
+//   Факт оборот = «Сумма» (замовлення 4 джерел, без стадій 8,9,10,11,24)
+//   % повернень = «Заказов Возврат» / «Кол-во заказов» × 100
+//                 (повернення = стадії ліда 20,21,22; дата = date_order)
+const RZPK_DEPTS = ['rzpk', 'retail', 'wholesale', 'resellers'];
+async function salaryFacts(q, employeeId, year, month, effectiveDeptCode) {
+  if (!isConfigured()) throw new Error('Odoo не підключено');
+  const y = parseInt(year), m = parseInt(month);
+  if (!y || !m) throw new Error('Невірний місяць');
+  const emp = (await q(`SELECT id, name, odoo_user_id FROM employees WHERE id=$1`, [employeeId]))[0];
+  if (!emp) throw new Error('Співробітника не знайдено');
+  if (!emp.odoo_user_id) throw new Error('Не прив\'язаний до Odoo (кнопка «🔗 Odoo» → «Хто є хто»)');
+  const dept = effectiveDeptCode ? await effectiveDeptCode(employeeId, y, m) : null;
+  if (dept && !RZPK_DEPTS.includes(dept)) throw new Error('Для цього відділу автопідстановка поки не підтримується');
+  const mStart = `${y}-${String(m).padStart(2, '0')}-01`;
+  const nextStart = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+  const fromUtc = kyivDayStartUtc(mStart), toUtc = kyivDayStartUtc(nextStart);
+  const uid = emp.odoo_user_id;
+  const orders = await call('sale.order', 'search_read', [[
+    ...RZPK_RULE.domain, ['user_id', '=', uid],
+    ['date_order', '>=', fromUtc], ['date_order', '<', toUtc],
+  ]], { fields: ['amount_total'] });
+  const returns = await call('sale.order', 'search_count', [[
+    ['state', '=', 'sale'], ['team_id', 'in', [6, 10, 11]],
+    ['opportunity_id.stage_id', 'in', [20, 21, 22]], ['user_id', '=', uid],
+    ['date_order', '>=', fromUtc], ['date_order', '<', toUtc],
+  ]]);
+  const fact = Math.round(orders.reduce((a, o) => a + (o.amount_total || 0), 0) * 100) / 100;
+  const n = orders.length;
+  const returnsPct = n ? Math.round(returns / n * 1000) / 10 : 0;
+  // остаточні цифри — після 15-го числа наступного місяця (докапують повернення)
+  const finalAfter = new Date(Date.UTC(y, m, 15)).toISOString().slice(0, 10);
+  return { employee_id: emp.id, fact, orders: n, returns, returns_pct: returnsPct,
+           as_of: new Date().toISOString(), final: todayKyiv() > finalAfter, final_after: finalAfter };
+}
+
 // ── Підключення до Express ───────────────────────────────
-function mount(app, { q, requireAuth }) {
+function mount(app, { q, requireAuth, effectiveDeptCode }) {
   migrate(q).catch(e => console.error('odoo-sync migrate:', e.message));
   // прив'язки і перезапис ручних сум — лише власник (role='owner')
   const requireOwner = (req, res, next) => requireAuth(req, res, () => {
@@ -357,6 +395,14 @@ function mount(app, { q, requireAuth }) {
       const r = await syncRange(q, from, to, { overwrite: !!req.body?.overwrite, trigger: 'user:' + (req.user?.login || req.user?.full_name || req.user?.id || '?') });
       res.json({ ok: true, from, to, ...r });
     } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Цифри для картки ЗП — лише показ, нічого не зберігає
+  app.get('/api/odoo/salary-facts', requireAuth, async (req, res) => {
+    try {
+      if (!req.user?.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
+      res.json(await salaryFacts(q, parseInt(req.query.employee_id), req.query.year, req.query.month, effectiveDeptCode));
+    } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
   // Підказки відповідності співробітників ↔ користувачів Odoo
