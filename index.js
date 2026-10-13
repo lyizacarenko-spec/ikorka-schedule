@@ -4140,6 +4140,6 @@ app.get('/api/finance/average', requireFinance, async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 // ── ODOO → ГРАФІК (автофакт продажів) ──
-require('./odoo-sync').mount(app, { q, requireAuth });
+require('./odoo-sync').mount(app, { q, requireAuth, effectiveDeptCode });
 
 app.listen(PORT, () => console.log(`✅ Schedule API on port ${PORT}`));
