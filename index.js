@@ -2275,7 +2275,12 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
     // 1-14, а не половиною окладу — інакше, якщо людина вийшла вже після
     // 15-го, ЦІЛА її зарплата (за дні 18-30, напр.) помилково потрапляла б
     // у виплату "15-те", хоча по факту вона має піти в "1-ше наст.".
-    const p1 = periodRange(y, m, 1), p2 = periodRange(y, m, 2);
+    // Ставочники-новачки: аванс рахується з 1-го по 15-те ВКЛЮЧНО
+    // (а не 1–14, як у відрядників/гарячих).
+    const _last = new Date(y, m, 0).getDate();
+    const _mm = String(m).padStart(2, '0');
+    const p1 = { from: `${y}-${_mm}-01`, to: `${y}-${_mm}-15` };
+    const p2 = { from: `${y}-${_mm}-16`, to: `${y}-${_mm}-${String(_last).padStart(2, '0')}` };
     let worked1 = 0, worked2 = 0;
     entries.forEach(e => {
       if (!isWorkStatus(e.status)) return;
