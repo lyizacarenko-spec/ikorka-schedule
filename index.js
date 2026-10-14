@@ -965,8 +965,10 @@ app.get('/api/stats', async (req, res) => {
         AND NOT (COALESCE((SELECT MAX(se.entry_date) FROM schedule_entries se
                            WHERE se.employee_id = e.id AND se.status = '-'),
                           DATE '9999-12-31') < $1::date)
+        -- ще не прийняті (start_date пізніше кінця місяця) в план не входять
+        AND (e.start_date IS NULL OR e.start_date <= $2::date)
       GROUP BY d.id, d.code, e.level, e.team
-    `, [start]);
+    `, [start, end]);
 
     const plans = await q(`
       SELECT * FROM level_plans
