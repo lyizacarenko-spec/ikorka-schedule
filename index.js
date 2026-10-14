@@ -2092,11 +2092,11 @@ function mentorIeBonus(ie) {
   return 0;
 }
 
-// ── РОП РЗПК: нова мотивація (з жовтня 2026) ──
+// ── РОП РЗПК: нова мотивація (з вересня 2026) ──
 // ЗП = 35 000 + бонус за план (90%:5000 / 95%:7500 / 100%:10000)
 //      + 3,5% від перевиконання (лише якщо маржинальність відділу ≥ 50%)
 //      + 3 000 за СРЧ + 3 000 за апрув
-const ROP_V2_CUTOVER_YM = '2026-10';
+const ROP_V2_CUTOVER_YM = '2026-09';
 function computeRopRzpkV2(row) {
   const r = row || {};
   const rate = 35000;
@@ -3282,7 +3282,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
             const adjList = adjByEmp[emp.id] || [];
             const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
             const total = rc.total + adjTotal;
-            const payout1 = rc.rate / 2;   // аванс 15-го = половина ставки (враховує персональну ставку)
+            const payout1 = rc.rate / 2;   // аванс = половина ставки (враховує персональну ставку), допки й залишок ставки — у «15-те»
             return {
               employee_id: emp.id, name: emp.name,
               dept_code: emp.dept_code, dept_name: emp.dept_name,
