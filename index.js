@@ -45,6 +45,9 @@ const RZPK_NEW_SCHEMES_CUTOVER_YM = '2026-09';
 // ═══════════════════════════════════════════════════════════
 const RZPK_RETAIL_GRADE_CUTOVER_YM = '2026-10';
 const OVERTIME_DAY_BONUS = 800;
+// Малий опт і Ресейл (менеджери МО/B2B, тімлід МО/Ресейл, старший МО) —
+// +1000 грн за кожен день понад норму 22 (з вересня 2026). Роздріб — 800.
+const OVERTIME_DAY_BONUS_WHOLESALE = 1000;
 const RETAIL_GRADE_BASE = { jun: 15000, mid: 20000, top: 25000 };
 const RETAIL_BONUS1_TABLE = {
   jun: [0, 1500, 3000, 4500],
@@ -198,13 +201,17 @@ function computeTeamleadMoSalary(row, workedGraph) {
   else if (cnt >= 15) bonus = 3000;
   const bonusManual = parseFloat(r.bonus_manual) || 0;
   const penalty = parseFloat(r.penalty) || 0;
-  const total = base + bonus + bonusManual - penalty;
+  // доплата за переробіток (з вересня 2026): +1000 грн за кожен день понад 22
+  const overtimeDays = Math.max(0, worked - 22);
+  const overtimeBonus = overtimeDays * OVERTIME_DAY_BONUS_WHOLESALE;
+  const total = base + bonus + bonusManual - penalty + overtimeBonus;
   let payout1 = Math.round(base / 2);
   if (payout1 > total) payout1 = Math.max(0, total);
   const payout2 = Math.max(0, total - payout1);
   return {
     scheme_type: 'teamlead_mo', base_rate: base, worked_days: worked,
     returned_clients: cnt, bonus, bonus_manual: bonusManual, penalty,
+    overtime_days: overtimeDays, overtime_bonus: overtimeBonus,
     total, payout1, payout2, pay_schedule: 'sales', advance: payout1, remainder: payout2,
   };
 }
@@ -233,9 +240,9 @@ function computeMoManagerSalary(row, workedGraph) {
 
   const bonusManual = parseFloat(r.bonus_manual) || 0;
   const penalty = parseFloat(r.penalty) || 0;
-  // доплата за переробіток (з вересня 2026): +800 грн за кожен день понад 22
+  // доплата за переробіток (з вересня 2026): +1000 грн за кожен день понад 22
   const overtimeDays = Math.max(0, worked - 22);
-  const overtimeBonus = overtimeDays * OVERTIME_DAY_BONUS;
+  const overtimeBonus = overtimeDays * OVERTIME_DAY_BONUS_WHOLESALE;
   const total = base + marginBonus + clientBonus + bonusManual - penalty + overtimeBonus;
   let payout1 = Math.round(base / 2);
   if (payout1 > total) payout1 = Math.max(0, total);
@@ -281,9 +288,9 @@ function computeB2bManagerSalary(row, workedGraph) {
 
   const bonusManual = parseFloat(r.bonus_manual) || 0;
   const penalty = parseFloat(r.penalty) || 0;
-  // доплата за переробіток (з вересня 2026): +800 грн за кожен день понад 22
+  // доплата за переробіток (з вересня 2026): +1000 грн за кожен день понад 22
   const overtimeDays = Math.max(0, worked - 22);
-  const overtimeBonus = overtimeDays * OVERTIME_DAY_BONUS;
+  const overtimeBonus = overtimeDays * OVERTIME_DAY_BONUS_WHOLESALE;
   const total = base + marginBonus + turnoverBonus + resBonus + bonusManual - penalty + overtimeBonus;
   let payout1 = Math.round(base / 2);
   if (payout1 > total) payout1 = Math.max(0, total);
@@ -2425,6 +2432,7 @@ function buildBreakdown(r) {
       push(`Бонус за повернутих клієнтів (${r.returned_clients})`, r.bonus);
       push('Доплата', r.bonus_manual);
       push('Штраф', r.penalty ? -r.penalty : 0);
+      push(`Переробка (${r.overtime_days} дн.)`, r.overtime_bonus);
       break;
     case 'mo_manager':
       push('Оклад', r.base_rate);
@@ -2432,6 +2440,7 @@ function buildBreakdown(r) {
       push(`Доплата за нових клієнтів (${r.new_clients_count})`, r.client_bonus);
       push('Доплата', r.bonus_manual);
       push('Штраф', r.penalty ? -r.penalty : 0);
+      push(`Переробка (${r.overtime_days} дн.)`, r.overtime_bonus);
       break;
     case 'b2b_manager':
       push('Оклад', r.base_rate);
@@ -2440,6 +2449,7 @@ function buildBreakdown(r) {
       push(`Доплата за нових реселерів (${r.new_resellers_count})`, r.reseller_bonus);
       push('Доплата', r.bonus_manual);
       push('Штраф', r.penalty ? -r.penalty : 0);
+      push(`Переробка (${r.overtime_days} дн.)`, r.overtime_bonus);
       break;
     default:
       break;
