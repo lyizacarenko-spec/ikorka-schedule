@@ -2080,19 +2080,42 @@ function ropHotOverPct(over) {
 // ═══════════════════════════════════════════════════════════
 // НАСТАВНИК — бонус за якість (середній бал тесту) + бонус за ІЕ групи
 // ═══════════════════════════════════════════════════════════
-function mentorQualityBonus(score) {
+const MENTOR_V2_CUTOVER_YM = '2026-10';   // нова мотивація наставника (затверджена 25.09.2026)
+function mentorQualityBonus(score, v2) {
   const s = parseFloat(score) || 0;
+  if (v2) {
+    if (s <= 60) return 0;
+    if (s <= 70) return 6500;
+    if (s <= 78) return 7500;
+    return 8000;
+  }
   if (s <= 60) return 0;
   if (s <= 70) return 10000;
   if (s <= 78) return 11000;
   return 12000;   // 79-87 і вище — стеля 12000
 }
-function mentorIeBonus(ie) {
+function mentorIeBonus(ie, v2) {
   const v = parseFloat(ie) || 0;
+  if (v2) {
+    if (v >= 1.07) return 4000;
+    if (v >= 0.90) return 2500;
+    return 0;
+  }
   if (v >= 1.07) return 6000;
   if (v >= 0.90) return 4000;
   return 0;
 }
+// Бонус за кількість випущених (лише нова мотивація)
+function mentorCountBonus(n) {
+  const c = parseInt(n) || 0;
+  if (c >= 10) return 6000;
+  if (c >= 7) return 5000;
+  if (c >= 4) return 4000;
+  if (c >= 1) return 2000;
+  return 0;
+}
+pool.query(`ALTER TABLE mentor_salary ADD COLUMN IF NOT EXISTS grads_count INTEGER DEFAULT 0`)
+  .catch(e => console.error('grads_count migration:', e.message));
 
 // ── РОП РЗПК: нова мотивація (з вересня 2026) ──
 // ЗП = 35 000 + бонус за план (90%:5000 / 95%:7500 / 100%:10000)
@@ -2454,6 +2477,7 @@ function buildBreakdown(r) {
       push('Оклад (± переробка)', r.fix_total);
       push('Бонус за якість тесту', r.quality_bonus);
       push('Бонус за ІЕ групи', r.ie_bonus);
+      push(`Бонус за кількість випущених (${r.grads_count || 0})`, r.count_bonus);
       break;
     case 'recruiter':
       push('Оклад (± переробка)', r.fix_total);
@@ -2794,17 +2818,17 @@ app.get('/api/mentor-salary', async (req, res) => {
 app.put('/api/mentor-salary', requireAuth, async (req, res) => {
   try {
     if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
-    const { employee_id, calc_year, calc_month, avg_score, group_ie } = req.body;
+    const { employee_id, calc_year, calc_month, avg_score, group_ie, grads_count } = req.body;
     const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
     if (empRow.length && !canDept(req.user, empRow[0].code))
       return res.status(403).json({ error: 'Немає доступу до цього відділу' });
     const rows = await q(
-      `INSERT INTO mentor_salary (employee_id, calc_year, calc_month, avg_score, group_ie, updated_at)
-       VALUES ($1,$2,$3,$4,$5,NOW())
+      `INSERT INTO mentor_salary (employee_id, calc_year, calc_month, avg_score, group_ie, grads_count, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,NOW())
        ON CONFLICT (employee_id, calc_year, calc_month)
-       DO UPDATE SET avg_score=$4, group_ie=$5, updated_at=NOW()
+       DO UPDATE SET avg_score=$4, group_ie=$5, grads_count=$6, updated_at=NOW()
        RETURNING *`,
-      [employee_id, calc_year, calc_month, avg_score||0, group_ie||0]);
+      [employee_id, calc_year, calc_month, avg_score||0, group_ie||0, parseInt(grads_count)||0]);
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -3335,11 +3359,14 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         const mRow = mentorByEmp[emp.id] || {};
         const avgScore = parseFloat(mRow.avg_score) || 0;
         const groupIe = parseFloat(mRow.group_ie) || 0;
-        const qBonus = mentorQualityBonus(avgScore);
-        const iBonus = mentorIeBonus(groupIe);
+        const mentorV2 = `${y}-${String(m).padStart(2, '0')}` >= MENTOR_V2_CUTOVER_YM;
+        const gradsCount = parseInt(mRow.grads_count) || 0;
+        const qBonus = mentorQualityBonus(avgScore, mentorV2);
+        const iBonus = mentorIeBonus(groupIe, mentorV2);
+        const cBonus = mentorV2 ? mentorCountBonus(gradsCount) : 0;
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
-        const total = fixCalc.total + qBonus + iBonus + adjTotal;
+        const total = fixCalc.total + qBonus + iBonus + cBonus + adjTotal;
         const payout1 = fixCalc.payout1;
         const payout2 = total - payout1;
         return {
@@ -3351,6 +3378,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
           fix_total: fixCalc.total,
           avg_score: avgScore, group_ie: groupIe,
           quality_bonus: qBonus, ie_bonus: iBonus,
+          grads_count: gradsCount, count_bonus: cBonus,
           adj_total: adjTotal, adjustments: adjList,
           total, payout1, payout2,
           pay_schedule: 'staff',
