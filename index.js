@@ -204,14 +204,18 @@ function computeTeamleadMoSalary(row, workedGraph) {
   // доплата за переробіток (з вересня 2026): +1000 грн за кожен день понад 22
   const overtimeDays = Math.max(0, worked - 22);
   const overtimeBonus = overtimeDays * OVERTIME_DAY_BONUS_WHOLESALE;
-  const total = base + bonus + bonusManual - penalty + overtimeBonus;
-  let payout1 = Math.round(base / 2);
+  // 5% від особистого обороту (з жовтня 2026) — виплачується на 1-ше
+  const ownTurnover = parseFloat(r.own_turnover) || 0;
+  const ownBonus = Math.round(ownTurnover * 0.05);
+  const total = base + bonus + bonusManual - penalty + overtimeBonus + ownBonus;
+  let payout1 = Math.round(base / 2) + ownBonus;
   if (payout1 > total) payout1 = Math.max(0, total);
   const payout2 = Math.max(0, total - payout1);
   return {
     scheme_type: 'teamlead_mo', base_rate: base, worked_days: worked,
     returned_clients: cnt, bonus, bonus_manual: bonusManual, penalty,
     overtime_days: overtimeDays, overtime_bonus: overtimeBonus,
+    own_turnover: ownTurnover, own_bonus: ownBonus,
     total, payout1, payout2, pay_schedule: 'sales', advance: payout1, remainder: payout2,
   };
 }
@@ -346,6 +350,10 @@ async function q(sql, params = []) {
   const { rows } = await pool.query(sql, params);
   return rows;
 }
+
+// особистий оборот тімліда МО/Ресейл (5% з жовтня 2026, виплата на 1-ше)
+pool.query(`ALTER TABLE teamlead_mo_salary ADD COLUMN IF NOT EXISTS own_turnover NUMERIC DEFAULT 0`)
+  .catch(e => console.error('own_turnover migration:', e.message));
 
 // ═══════════════════════════════════════════════════════════
 // АВТОРИЗАЦІЯ ТА ПРАВА ДОСТУПУ
@@ -1118,14 +1126,14 @@ app.get('/api/teamlead-mo-salary', async (req, res) => {
 app.put('/api/teamlead-mo-salary', requireAuth, async (req, res) => {
   try {
     if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
-    const { employee_id, calc_year, calc_month, returned_clients, bonus_manual, penalty, note } = req.body;
+    const { employee_id, calc_year, calc_month, returned_clients, bonus_manual, penalty, note, own_turnover } = req.body;
     const rows = await q(
-      `INSERT INTO teamlead_mo_salary (employee_id, calc_year, calc_month, returned_clients, bonus_manual, penalty, note, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+      `INSERT INTO teamlead_mo_salary (employee_id, calc_year, calc_month, returned_clients, bonus_manual, penalty, note, own_turnover, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
        ON CONFLICT (employee_id, calc_year, calc_month)
-       DO UPDATE SET returned_clients=$4, bonus_manual=$5, penalty=$6, note=$7, updated_at=NOW()
+       DO UPDATE SET returned_clients=$4, bonus_manual=$5, penalty=$6, note=$7, own_turnover=$8, updated_at=NOW()
        RETURNING *`,
-      [employee_id, calc_year, calc_month, returned_clients||0, bonus_manual||0, penalty||0, note||null]
+      [employee_id, calc_year, calc_month, returned_clients||0, bonus_manual||0, penalty||0, note||null, own_turnover||0]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2430,6 +2438,7 @@ function buildBreakdown(r) {
     case 'teamlead_mo':
       push('Ставка', r.base_rate);
       push(`Бонус за повернутих клієнтів (${r.returned_clients})`, r.bonus);
+      push('5% від особистого обороту (1-ше)', r.own_bonus);
       push('Доплата', r.bonus_manual);
       push('Штраф', r.penalty ? -r.penalty : 0);
       push(`Переробка (${r.overtime_days} дн.)`, r.overtime_bonus);
