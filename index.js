@@ -2092,9 +2092,47 @@ function mentorIeBonus(ie) {
   return 0;
 }
 
-function computeRopSalary(deptCode, row, customRate) {
+// ── РОП РЗПК: нова мотивація (з жовтня 2026) ──
+// ЗП = 35 000 + бонус за план (90%:5000 / 95%:7500 / 100%:10000)
+//      + 3,5% від перевиконання (лише якщо маржинальність відділу ≥ 50%)
+//      + 3 000 за СРЧ + 3 000 за апрув
+const ROP_V2_CUTOVER_YM = '2026-10';
+function computeRopRzpkV2(row) {
+  const r = row || {};
+  const rate = 35000;
+  const planTarget = parseFloat(r.plan_target) || 0;
+  const planFact   = parseFloat(r.plan_fact)   || 0;
+  const pct = planTarget > 0 ? (planFact / planTarget * 100) : 0;
+  let tier = 0;
+  if (pct >= 100) tier = 10000;
+  else if (pct >= 95) tier = 7500;
+  else if (pct >= 90) tier = 5000;
+  const marginOk = !!r.margin_ok;
+  const overBonus = (pct > 100 && marginOk) ? Math.round((planFact - planTarget) * 0.035) : 0;
+  const srchOk = !!r.srch_ok, aprOk = !!r.apr_ok;
+  const payKpi = (srchOk ? 3000 : 0) + (aprOk ? 3000 : 0);
+  const bonus = parseFloat(r.bonus) || 0;
+  const penalty = parseFloat(r.penalty) || 0;
+  const payPlan = tier + overBonus;
+  const total = rate + payKpi + payPlan + bonus - penalty;
+  return {
+    scheme_type: 'rop', dept_code: 'rzpk', rop_v2: true,
+    rate, plan_target: planTarget, plan_fact: planFact,
+    plan_pct: Math.round(pct * 10) / 10,
+    srch_ok: srchOk, apr_ok: aprOk, kpi_each: 3000, pay_kpi: payKpi,
+    margin_ok: marginOk, over_bonus: overBonus,
+    pay_plan: payPlan, plan_bonus_max: 10000,
+    own_sum: 0, own_hot: 0, own_cold: 0, pay_own: 0,
+    bonus, penalty, total,
+  };
+}
+pool.query(`ALTER TABLE rop_salary ADD COLUMN IF NOT EXISTS margin_ok BOOLEAN DEFAULT false`)
+  .catch(e => console.error('margin_ok migration:', e.message));
+
+function computeRopSalary(deptCode, row, customRate, ym) {
   const C = ROP_CFG[deptCode];
   if (!C) return null;
+  if (deptCode === 'rzpk' && ym && ym >= ROP_V2_CUTOVER_YM) return computeRopRzpkV2(row);
   const rate = (customRate != null && parseFloat(customRate) > 0) ? parseFloat(customRate) : C.rate;
   const r = row || {};
   const planTarget = parseFloat(r.plan_target) || 0;
@@ -2720,22 +2758,22 @@ app.put('/api/rop-salary', requireAuth, async (req, res) => {
   try {
     if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
     const { employee_id, calc_year, calc_month, plan_target, plan_fact,
-            srch_ok, apr_ok, own_sum, own_hot, own_cold, bonus, penalty, note } = req.body;
+            srch_ok, apr_ok, own_sum, own_hot, own_cold, bonus, penalty, note, margin_ok } = req.body;
     const empRow = await q(`SELECT d.code FROM employees e JOIN departments d ON d.id=e.department_id WHERE e.id=$1`, [employee_id]);
     if (empRow.length && !canDept(req.user, empRow[0].code))
       return res.status(403).json({ error: 'Немає доступу до цього відділу' });
     const rows = await q(
       `INSERT INTO rop_salary (employee_id, calc_year, calc_month, plan_target, plan_fact,
-         srch_ok, apr_ok, own_sum, own_hot, own_cold, bonus, penalty, note, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+         srch_ok, apr_ok, own_sum, own_hot, own_cold, bonus, penalty, note, margin_ok, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
        ON CONFLICT (employee_id, calc_year, calc_month)
        DO UPDATE SET plan_target=$4, plan_fact=$5, srch_ok=$6, apr_ok=$7,
                      own_sum=$8, own_hot=$9, own_cold=$10, bonus=$11, penalty=$12,
-                     note=$13, updated_at=NOW()
+                     note=$13, margin_ok=$14, updated_at=NOW()
        RETURNING *`,
       [employee_id, calc_year, calc_month, plan_target||0, plan_fact||0,
        srch_ok===true, apr_ok===true, own_sum||0, own_hot||0, own_cold||0,
-       bonus||0, penalty||0, note||null]);
+       bonus||0, penalty||0, note||null, margin_ok===true]);
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -3239,7 +3277,8 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         if (['rop','head','teamlead'].includes(effRole)) {
           // РОП відділів продажів — своя мотивація
           if (effRole === 'rop' && ROP_CFG[emp.dept_code]) {
-            const rc = computeRopSalary(emp.dept_code, ropByEmp[emp.id], emp.custom_rop_rate);
+            const rc = computeRopSalary(emp.dept_code, ropByEmp[emp.id], emp.custom_rop_rate,
+              `${y}-${String(m).padStart(2, '0')}`);
             const adjList = adjByEmp[emp.id] || [];
             const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
             const total = rc.total + adjTotal;
