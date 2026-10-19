@@ -925,6 +925,39 @@ app.put('/api/plans', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── ЗАКРІПЛЕНИЙ ПЛАН ВІДДІЛУ НА МІСЯЦЬ ───────────────────────
+// Одне фіксоване число на відділ/місяць. Якщо воно є — план відділу в /api/stats
+// береться саме з нього і НЕ залежить від кількості людей/рівнів. Змінюється
+// лише явно (у фронтенді — з підтвердженням).
+pool.query(`CREATE TABLE IF NOT EXISTS plan_locks (
+  department_id INT NOT NULL,
+  plan_year INT NOT NULL,
+  plan_month INT NOT NULL,
+  total_amount NUMERIC NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_by TEXT,
+  PRIMARY KEY (department_id, plan_year, plan_month)
+)`).catch(e => console.error('plan_locks migration:', e.message));
+
+app.put('/api/plan-locks', async (req, res) => {
+  try {
+    const { department_id, plan_year, plan_month, total_amount, updated_by } = req.body;
+    const amt = parseFloat(total_amount) || 0;
+    if (amt <= 0) {
+      await q(`DELETE FROM plan_locks WHERE department_id=$1 AND plan_year=$2 AND plan_month=$3`,
+        [department_id, plan_year, plan_month]);
+      return res.json({ ok: true, removed: true });
+    }
+    const rows = await q(
+      `INSERT INTO plan_locks (department_id, plan_year, plan_month, total_amount, updated_at, updated_by)
+       VALUES ($1,$2,$3,$4,NOW(),$5)
+       ON CONFLICT (department_id, plan_year, plan_month)
+       DO UPDATE SET total_amount=$4, updated_at=NOW(), updated_by=$5 RETURNING *`,
+      [department_id, plan_year, plan_month, amt, updated_by || null]);
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Видалення конкретного плану (коли поле очистили в інтерфейсі — має справді
 // прибрати рядок з БД, а не просто лишити старе значення).
 app.delete('/api/plans', async (req, res) => {
@@ -978,6 +1011,11 @@ app.get('/api/stats', async (req, res) => {
       SELECT * FROM level_plans
       WHERE plan_year=$1 AND plan_month=$2`, [y, m]);
 
+    let locks = [];
+    try {
+      locks = await q(`SELECT department_id, total_amount FROM plan_locks WHERE plan_year=$1 AND plan_month=$2`, [y, m]);
+    } catch (_) { locks = []; }
+
     const revDetail = await q(`
       SELECT e.department_id, SUM(rd.amount) AS total
       FROM daily_revenue_detail rd JOIN employees e ON e.id = rd.employee_id
@@ -1018,6 +1056,11 @@ app.get('/api/stats', async (req, res) => {
         planTotal += subtotal;
       });
 
+      // закріплений план перекриває розрахунковий (від кількості людей)
+      const lockRow = locks.find(l => l.department_id === dept.id);
+      const planLocked = !!lockRow;
+      if (lockRow) planTotal = parseFloat(lockRow.total_amount) || planTotal;
+
       const detailRow = revDetail.find(r => r.department_id === dept.id);
       const deptRow   = revDept.find(r => r.department_id === dept.id);
       const factTotal = Math.max(
@@ -1036,6 +1079,7 @@ app.get('/api/stats', async (req, res) => {
         dept_code: dept.code,
         dept_name: dept.name,
         plan_total: planTotal,
+        plan_locked: planLocked,
         plan_breakdown: planBreakdown,
         fact_total: factTotal,
         pct,
