@@ -965,10 +965,14 @@ app.get('/api/stats', async (req, res) => {
         AND NOT (COALESCE((SELECT MAX(se.entry_date) FROM schedule_entries se
                            WHERE se.employee_id = e.id AND se.status = '-'),
                           DATE '9999-12-31') < $1::date)
-        -- ще не прийняті (start_date пізніше кінця місяця) в план не входять
-        AND (e.start_date IS NULL OR e.start_date <= $2::date)
+        -- ще не прийняті (start_date пізніше початку місяця) в план цього місяця не входять
+        AND (e.start_date IS NULL OR e.start_date <= $1::date)
+        -- ПЛАН НЕ МІНЯЄТЬСЯ від додавання нових людей протягом місяця: хто доданий
+        -- в систему вже ПІСЛЯ 1-го числа цього місяця — у плані цього місяця не
+        -- рахується (з наступного місяця — рахується)
+        AND NOT (e.created_at >= ($1::date + 1) AND e.created_at < ($1::date + INTERVAL '1 month'))
       GROUP BY d.id, d.code, e.level, e.team
-    `, [start, end]);
+    `, [start]);
 
     const plans = await q(`
       SELECT * FROM level_plans
