@@ -1874,7 +1874,7 @@ function defaultStatusFor(deptCode, dow, empName, dateStr) {
   if (deptCode === 'admin' && empName === 'Мединська Ірина')
     return (dow === 0 || dow === 6) ? 'вих' : '9:30-17:30';
   if (deptCode === 'accounting') return (dow === 0 || dow === 6) ? 'вих' : '9-17';
-  if (deptCode === 'warehouse') return (dateStr && dateStr >= '2026-10-01') ? '9:00-18:30' : '9-19';
+  if (deptCode === 'warehouse') return (dateStr && dateStr >= '2026-10-01' && dateStr < '2026-11-01') ? '9:00-18:30' : '9-19';
   if (deptCode === 'rzpk') return (dateStr && dateStr >= '2026-10-01') ? '10-19' : '10-18';
   // логісти: з 1 жовтня 2026 — графік 2/2, зміна 9:00-21:00. Для співробітників
   // з відомою фазою циклу (SHIFT22_PHASE) — цикл генерується автоматично;
