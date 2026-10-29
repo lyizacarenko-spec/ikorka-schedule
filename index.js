@@ -4039,9 +4039,10 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     // зачепити вже порахований/позначений виплаченим підсумок у "Фінансах").
     const WAREHOUSE_HYBRID_FALLBACK_IDS = [160];
     const emps = await q(
-      `SELECT e.id, e.name, s.scheme_type, s.base_rate, s.prev_base_rate, s.rate_change_date,
+      `SELECT e.id, e.name, d.code AS dept_code, s.scheme_type, s.base_rate, s.prev_base_rate, s.rate_change_date,
               s.prev_scheme_type, s.scheme_type_change_date
        FROM employees e
+       JOIN departments d ON d.id = e.department_id
        JOIN salary_schemes s ON s.employee_id = e.id
        WHERE e.is_active = true
          AND (
@@ -4060,6 +4061,12 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
            OR e.id = ANY($3)
          )
        ORDER BY e.name`, [start, end, WAREHOUSE_HYBRID_FALLBACK_IDS]);
+    // ізоляція філій: Дніпро не бачить складу Вінниці (vin_*) і навпаки —
+    // та сама перевірка canDept, що й у головній таблиці Фінансів
+    const _restrictedSet = await getRestrictedDeptCodes();
+    for (let _i = emps.length - 1; _i >= 0; _i--) {
+      if (!canDept({ ...req.user, can_salary: true }, emps[_i].dept_code, _restrictedSet)) emps.splice(_i, 1);
+    }
     // мапа схем для правильного підрахунку (гібрид рахує ТІЛЬКИ фасовку у тижнях)
     // — для тих, у кого дата переходу ще не настала (весь місяць) або настала
     // ВСЕРЕДИНІ місяця, використовуємо ПОПЕРЕДНЮ схему (саме за нею рахувались
