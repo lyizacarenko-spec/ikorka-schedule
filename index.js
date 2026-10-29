@@ -2336,6 +2336,10 @@ function computeHotPeriod(entries, per, isInsta) {
         : { from: `${y}-${mm}-15`, to: `${y}-${mm}-${String(last).padStart(2,'0')}` };
     }
 
+// id співробітника -> норма годин на день (переробка по годинах, з жовтня 2026)
+const OVERTIME_HOURS_NORM = { 160: 10, 162: 10 };
+const OVERTIME_HOURS_FROM_YM = '2026-10';
+
 function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate, employeeId) {
   const base = parseFloat(scheme.base_rate) || 0;
   const normType = scheme.norm_type || 'fixed';
@@ -2365,6 +2369,21 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
   const diff = worked - targetDays;                 // + переробка / − недопрацював
   const dayAdjust = diff * dayPrice;
 
+  // ПЕРЕРОБКА ПО ГОДИНАХ (з жовтня 2026): для Довбня Наталья (160) і Шквира Марія (162)
+  // норма дня — 10 год (9-19); кожна година СВЕРХ норми оплачується за ціною
+  // дня / 10 (оклад / 22 / 10). Коротші дні ставку не зменшують.
+  let otHours = 0;
+  if (employeeId && OVERTIME_HOURS_NORM[employeeId] && `${y}-${String(m).padStart(2,'0')}` >= OVERTIME_HOURS_FROM_YM) {
+    const normH = OVERTIME_HOURS_NORM[employeeId];
+    entries.forEach(e => {
+      if (!isWorkStatus(e.status)) return;
+      const hrs = hotShiftHours(e.status);
+      if (hrs != null && hrs > normH) otHours += (hrs - normH);
+    });
+    otHours = Math.round(otHours * 100) / 100;
+  }
+  const otPay = otHours > 0 ? Math.round(otHours * dayPrice / 10 * 100) / 100 : 0;
+
   // корегування (зі знаком): сума всіх рядків
   const adjList = adjustments || [];
   const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
@@ -2374,8 +2393,8 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
   const total = isFlatOklad
     ? (base + adjTotal)
     : isNewStaff
-      ? (worked * dayPrice + adjTotal)
-      : (base + dayAdjust + adjTotal);
+      ? (worked * dayPrice + adjTotal + otPay)
+      : (base + dayAdjust + adjTotal + otPay);
   // Ставочники (адмінка, логістика, бухгалтерія, навчання, керівництво):
   //   Виплата 1 = АВАНС (15-те число поточного місяця) = половина окладу
   //   Виплата 2 = залишок ставки + допки (1-ше число наступного місяця)
@@ -2399,7 +2418,7 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
       else if (e.entry_date >= p2.from && e.entry_date <= p2.to) worked2 += 1;
     });
     payout1 = worked1 * dayPrice;
-    payout2 = worked2 * dayPrice + adjTotal;
+    payout2 = worked2 * dayPrice + adjTotal + otPay;
   } else {
     payout1 = base / 2;                      // аванс 15-го
     if (payout1 > total) payout1 = Math.max(0, total);
@@ -2423,6 +2442,8 @@ function computeFixedRate(scheme, entries, salRow, y, m, adjustments, startDate,
     diff_days: isFlatOklad ? 0 : diff,
     day_adjust: isFlatOklad ? 0 : dayAdjust,
     adj_total: adjTotal,
+    ot_hours: otHours,
+    ot_pay: otPay,
     adjustments: adjList,
     total,
     payout1,
@@ -2461,6 +2482,7 @@ function buildBreakdown(r) {
       } else {
         push('Оклад', r.base_rate);
         push(r.diff_days >= 0 ? 'Переробка' : 'Недопрацьовано', r.day_adjust);
+        if (r.ot_pay) push(`Переробка (${r.ot_hours} год.)`, r.ot_pay);
       }
       break;
     case 'warehouse_hybrid':
