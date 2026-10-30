@@ -4067,6 +4067,15 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
     for (let _i = emps.length - 1; _i >= 0; _i--) {
       if (!canDept({ ...req.user, can_salary: true }, emps[_i].dept_code, _restrictedSet)) emps.splice(_i, 1);
     }
+    // власник/адмін бачить обидві філії — тому фронтенд передає, яку саме
+    // показувати (?branch=vin | main): у Вінниці лише vin_*, у Дніпрі без vin_*
+    const _branch = req.query.branch;
+    if (_branch === 'vin' || _branch === 'main') {
+      for (let _i = emps.length - 1; _i >= 0; _i--) {
+        const isVin = String(emps[_i].dept_code || '').startsWith('vin_');
+        if ((_branch === 'vin') !== isVin) emps.splice(_i, 1);
+      }
+    }
     // мапа схем для правильного підрахунку (гібрид рахує ТІЛЬКИ фасовку у тижнях)
     // — для тих, у кого дата переходу ще не настала (весь місяць) або настала
     // ВСЕРЕДИНІ місяця, використовуємо ПОПЕРЕДНЮ схему (саме за нею рахувались
