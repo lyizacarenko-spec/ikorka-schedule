@@ -2336,6 +2336,9 @@ function computeHotPeriod(entries, per, isInsta) {
         : { from: `${y}-${mm}-15`, to: `${y}-${mm}-${String(last).padStart(2,'0')}` };
     }
 
+// Лінійні керівники, у яких на 15-те лише півставки, а все решта — на 1-ше
+const BONUS_ON_FIRST_IDS = [102, 108];   // Романенко Антон, Даніелла
+
 // id співробітника -> норма годин на день (переробка по годинах, з жовтня 2026)
 const OVERTIME_HOURS_NORM = { 160: 10, 162: 10 };
 const OVERTIME_HOURS_FROM_YM = '2026-10';
@@ -3586,6 +3589,19 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
       };
     });
 
+    // ВИНЯТОК: Романенко Антон (102) і Даніелла (108) — на 15-те лише половина
+    // ставки, а ВСЕ інше (друга половина ставки, допки, %, бонуси) — на 1-ше.
+    // Стандартна 'sales'-схема навпаки (1-ше аванс = півставки, 15-те = залишок+%),
+    // тому для них міняємо виплати місцями.
+    rows.forEach(r => {
+      if (!BONUS_ON_FIRST_IDS.includes(r.employee_id)) return;
+      if (r.pay_schedule !== 'sales' || r.total == null || r.payout1 == null) return;
+      const half = Math.min(r.payout1, r.total);
+      r.payout2 = half;                                   // 15-те = півставки
+      r.payout1 = Math.max(0, r.total - half);            // 1-ше = решта разом з допками
+      r.advance = r.payout1; r.remainder = r.payout2;
+    });
+
     // авансові виплати заздалегідь — аванс, виданий ДО 15-го, зменшує ту
     // виплату, що покриває період до 15-го; аванс, виданий 15-го і пізніше —
     // зменшує виплату, що покриває період 15–1-ше. Для звичайних схем
@@ -3913,7 +3929,13 @@ app.get('/api/finance', requireFinance, async (req, res) => {
       // авансові виплати заздалегідь (advance_payments) — вони реальні окремі
       // видачі грошей ПОВЕРХ самої суми "15-те", а не вже "закладені" в override1.
       // Не чіпаємо 'hot' — там два періоди незалежні, а не аванс+залишок.
-      if (r.override1 != null && r.override2 == null && r.total != null && r.pay_schedule !== 'hot') {
+      if (BONUS_ON_FIRST_IDS.includes(r.employee_id) && r.pay_schedule === 'sales') {
+        // зворотний порядок: 15-те фіксоване (півставки), 1-ше = решта від фактично виданого 15-го
+        if (r.override2 != null && r.override1 == null && r.total != null) {
+          r.payout1 = Math.max(0, r.total - r.override2 - (r.advance_p1||0) - (r.advance_p2||0));
+          r.pay1 = r.payout1;
+        }
+      } else if (r.override1 != null && r.override2 == null && r.total != null && r.pay_schedule !== 'hot') {
         r.payout2 = Math.max(0, r.total - r.override1 - (r.advance_p1||0) - (r.advance_p2||0));
         r.pay2 = r.payout2;
       }
