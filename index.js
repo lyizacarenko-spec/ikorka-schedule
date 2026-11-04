@@ -790,6 +790,13 @@ app.patch('/api/employees/:id', async (req, res) => {
        WHERE id = $6 RETURNING *`,
       [name, department_id, level, role, is_active, req.params.id, team || null, start_date || null, position || null]
     );
+    // команда старшого менеджера (null = без команди); ключ присутній у тілі → змінюємо
+    if (rows[0] && Object.prototype.hasOwnProperty.call(req.body, 'squad_leader_id')) {
+      let lid = parseInt(req.body.squad_leader_id);
+      if (!lid || lid === parseInt(req.params.id)) lid = null;
+      await q(`UPDATE employees SET squad_leader_id=$1 WHERE id=$2`, [lid, req.params.id]);
+      rows[0].squad_leader_id = lid;
+    }
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -976,6 +983,9 @@ pool.query(`CREATE TABLE IF NOT EXISTS grade_history (
   set_at TIMESTAMPTZ DEFAULT NOW(),
   PRIMARY KEY (employee_id, effective_ym)
 )`).catch(e => console.error('grade_history:', e.message));
+// Команда старшого менеджера в РЗПК: окреме поле (НЕ team — воно впливає на формули ЗП)
+pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS squad_leader_id INT`)
+  .catch(e => console.error('squad_leader_id:', e.message));
 function realYmKyiv() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kiev', year: 'numeric', month: '2-digit' }).format(new Date());
 }
