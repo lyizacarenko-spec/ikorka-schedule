@@ -417,6 +417,16 @@ async function getRestrictedDeptCodes() {
   } catch (e) { return new Set(); }
 }
 
+// Прибирає з відповіді рядки ЗАКРИТИХ відділів (restricted), яких цей користувач
+// не має права бачити. Для відкритих відділів нічого не міняє. Працює і без
+// входу (тоді закриті рядки просто ховаються) — для старих відкритих ендпоінтів.
+async function hideRestrictedRows(req, rows, codeField = 'dept_code') {
+  const rs = await getRestrictedDeptCodes();
+  if (!rs.size) return rows;
+  const u = req.user || await getUser(req);
+  return rows.filter(r => !rs.has(r[codeField]) || canSeeDept(u, r[codeField], rs));
+}
+
 // middleware: вимагає входу
 async function requireAuth(req, res, next) {
   const u = await getUser(req);
@@ -737,7 +747,36 @@ app.post('/api/employees', async (req, res) => {
 
 app.patch('/api/employees/:id', async (req, res) => {
   try {
-    const { name, department_id, level, role, is_active, team, start_date, position } = req.body;
+    const { name, department_id, role, is_active, team, start_date, position } = req.body;
+    let level = req.body.level;
+    // ── ЗМІНА ГРЕЙДУ: лише з поточного/майбутнього місяця, минулі закриті,
+    // тільки з підтвердженням (confirm:true). Пишемо в grade_history.
+    if (level !== undefined && level !== null) {
+      const cur = await q(`SELECT level FROM employees WHERE id=$1`, [req.params.id]);
+      if (!cur.length) return res.status(404).json({ error: 'Співробітника не знайдено' });
+      if (cur[0].level === level && !req.body.ym) {
+        level = null; // без змін
+      } else {
+        const realYm = realYmKyiv();
+        const ym = /^\d{4}-\d{2}$/.test(req.body.ym || '') ? req.body.ym : realYm;
+        if (ym < realYm) {
+          return res.status(403).json({ error: 'Минулий місяць закрито — грейд за нього змінити не можна' });
+        }
+        if (req.body.confirm !== true) {
+          return res.status(409).json({ error: 'Потрібне підтвердження зміни грейду', needConfirm: true });
+        }
+        const hist = await q(`SELECT 1 FROM grade_history WHERE employee_id=$1 LIMIT 1`, [req.params.id]);
+        if (!hist.length) {
+          await q(`INSERT INTO grade_history (employee_id, effective_ym, level, set_by) VALUES ($1,'0000-00',$2,'baseline')
+                   ON CONFLICT DO NOTHING`, [req.params.id, cur[0].level]);
+        }
+        await q(`INSERT INTO grade_history (employee_id, effective_ym, level, set_by) VALUES ($1,$2,$3,$4)
+                 ON CONFLICT (employee_id, effective_ym) DO UPDATE SET level=$3, set_by=$4, set_at=NOW()`,
+                [req.params.id, ym, level, (req.user && (req.user.login || req.user.full_name)) || null]);
+        // employees.level = грейд на ПОТОЧНИЙ місяць (для екранів без вибору місяця)
+        if (ym > realYm) level = null;
+      }
+    }
     const rows = await q(
       `UPDATE employees SET
         name = COALESCE($1, name),
@@ -925,6 +964,26 @@ app.put('/api/plans', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── ІСТОРІЯ ГРЕЙДІВ (закриті місяці) ─────────────────────────
+// Грейд діє З місяця effective_ym і далі, до наступного запису. Минулі місяці
+// не змінюються: зміна грейду пише запис лише з поточного місяця. Базовий
+// запис '0000-00' = грейд до першої зміни (щоб історія не «попливла»).
+pool.query(`CREATE TABLE IF NOT EXISTS grade_history (
+  employee_id INT NOT NULL,
+  effective_ym TEXT NOT NULL,
+  level TEXT NOT NULL,
+  set_by TEXT,
+  set_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (employee_id, effective_ym)
+)`).catch(e => console.error('grade_history:', e.message));
+function realYmKyiv() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kiev', year: 'numeric', month: '2-digit' }).format(new Date());
+}
+// SQL-вираз: грейд співробітника e на місяць ym ('YYYY-MM' — вираз/параметр)
+function gradeAtSql(ymExpr) {
+  return `COALESCE((SELECT gh.level FROM grade_history gh WHERE gh.employee_id = e.id AND gh.effective_ym <= ${ymExpr} ORDER BY gh.effective_ym DESC LIMIT 1), e.level)`;
+}
+
 // ── ЗАКРІПЛЕНИЙ ПЛАН ВІДДІЛУ НА МІСЯЦЬ ───────────────────────
 // Одне фіксоване число на відділ/місяць. Якщо воно є — план відділу в /api/stats
 // береться саме з нього і НЕ залежить від кількості людей/рівнів. Змінюється
@@ -988,11 +1047,12 @@ app.get('/api/stats', async (req, res) => {
     // ігнорується (там team-специфічних планів нема — рахується як раніше).
     // РОП, тімлід і керівник не рахуються в план
     const empCounts = await q(`
-      SELECT d.id AS dept_id, d.code AS dept_code, e.level, e.team, COUNT(*) AS cnt
+      SELECT d.id AS dept_id, d.code AS dept_code, gl.lvl AS level, e.team, COUNT(*) AS cnt
       FROM employees e JOIN departments d ON d.id = e.department_id
+      JOIN LATERAL (SELECT ${gradeAtSql(`to_char($1::date,'YYYY-MM')`)} AS lvl) gl ON true
       WHERE e.is_active = true
         AND e.role NOT IN ('rop','head','teamlead')
-        AND e.level != 'new'
+        AND gl.lvl != 'new'
         -- звільнені до початку місяця не входять в план (is_active могли не
         -- перемкнути) — та сама логіка, що в GET /api/employees і Фінансах
         AND NOT (COALESCE((SELECT MAX(se.entry_date) FROM schedule_entries se
@@ -1004,7 +1064,7 @@ app.get('/api/stats', async (req, res) => {
         -- в систему вже ПІСЛЯ 1-го числа цього місяця — у плані цього місяця не
         -- рахується (з наступного місяця — рахується)
         AND NOT (e.created_at >= ($1::date + 1) AND e.created_at < ($1::date + INTERVAL '1 month'))
-      GROUP BY d.id, d.code, e.level, e.team
+      GROUP BY d.id, d.code, gl.lvl, e.team
     `, [start]);
 
     const plans = await q(`
@@ -1104,7 +1164,7 @@ app.get('/api/salary', async (req, res) => {
                WHERE s.calc_year=$1 AND s.calc_month=$2`;
     const params = [y, m];
     if (dept) { sql += ' AND d.code=$3'; params.push(dept); }
-    res.json(await q(sql, params));
+    res.json(await hideRestrictedRows(req, await q(sql, params)));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1478,12 +1538,12 @@ app.post('/api/export/salary', async (req, res) => {
 // ═══════════════════════════════════════════════════════════
 // SALARY SCHEMES (оклади ставочників)
 // ═══════════════════════════════════════════════════════════
-app.get('/api/salary-schemes', async (_, res) => {
+app.get('/api/salary-schemes', async (req, res) => {
   try {
-    res.json(await q(`SELECT s.*, e.name AS emp_name, d.code AS dept_code
+    res.json(await hideRestrictedRows(req, await q(`SELECT s.*, e.name AS emp_name, d.code AS dept_code
                       FROM salary_schemes s
                       JOIN employees e ON e.id = s.employee_id
-                      JOIN departments d ON d.id = e.department_id`));
+                      JOIN departments d ON d.id = e.department_id`)));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -2949,7 +3009,8 @@ async function computeFinanceRows(y, m, dept) {
 
     // всі активні співробітники зі схемою fixed_rate
     const effDeptCode2 = `(CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.code ELSE d.code END)`;
-    let empSql = `SELECT e.id, e.name, e.level, e.role, e.start_date, e.custom_rop_rate, e.role_teamlead_since, e.prev_role,
+    const gradeYm = `${parseInt(y)}-${String(parseInt(m)).padStart(2, '0')}`;
+    let empSql = `SELECT e.id, e.name, ${gradeAtSql(`'${gradeYm}'`)} AS level, e.role, e.start_date, e.custom_rop_rate, e.role_teamlead_since, e.prev_role,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.id ELSE d.id END) AS dept_id,
                          ${effDeptCode2} AS dept_code,
                          (CASE WHEN e.dept_transfer_date IS NOT NULL AND $2 < e.dept_transfer_date THEN pd.name ELSE d.name END) AS dept_name,
@@ -4294,7 +4355,7 @@ app.get('/api/finance/average', requireFinance, async (req, res) => {
                     WHERE e.is_active = true AND s.scheme_type='fixed_rate' AND s.base_rate>0`;
       const params = [];
       if (dept) { empSql += ` AND d.code=$${params.length+1}`; params.push(dept); }
-      const emps = await q(empSql, params);
+      const emps = await hideRestrictedRows(req, await q(empSql, params));
 
       const sched = await q(
         `SELECT se.employee_id, se.entry_date, se.status
