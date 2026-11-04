@@ -2631,6 +2631,19 @@ function buildBreakdown(r) {
       push('Доплата', r.bonus_manual);
       push('Штраф', r.penalty ? -r.penalty : 0);
       break;
+    // РЗПК-роздріб: computeRetailSalary повертає scheme_type = retail_v2_legacy /
+    // retail_v2_newcomer / retail_v2_grade — раніше для них деталізації не було
+    case 'retail_v2_legacy':
+    case 'retail_v2_newcomer':
+    case 'retail_v2_grade':
+      push('Оклад', r.base_rate);
+      push(`Бонус 1 — показники (${r.indicators_count || 0} з 3)`, r.bonus1);
+      push(`Бонус за план (${r.pct}%)`, r.bonus2);
+      push('Штраф за повернення', r.return_penalty ? -r.return_penalty : 0);
+      push('Доплата', r.bonus_manual);
+      push('Штраф', r.penalty ? -r.penalty : 0);
+      push(`Переробка (${r.overtime_days} дн.)`, r.overtime_bonus);
+      break;
     case 'teamlead_retail':
       push('Ставка', r.base_rate);
       push(`Бонус за план відділу (${r.bonus_rate}%)`, r.bonus);
