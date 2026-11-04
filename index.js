@@ -841,12 +841,15 @@ app.get('/api/schedule', requireAuth, async (req, res) => {
 app.put('/api/schedule', requireAuth, async (req, res) => {
   try {
     const { employee_id, entry_date, status, note, updated_by } = req.body;
+    // note не передано (зміна лише статусу) → коментар до клітинки ЗБЕРІГАЄТЬСЯ;
+    // note передано (навіть порожній) → перезаписуємо/очищаємо
+    const noteGiven = note !== undefined;
     const rows = await q(
       `INSERT INTO schedule_entries (employee_id, entry_date, status, note, updated_by, updated_at)
        VALUES ($1,$2,$3,$4,$5,NOW())
        ON CONFLICT (employee_id, entry_date)
-       DO UPDATE SET status=$3, note=$4, updated_by=$5, updated_at=NOW() RETURNING *`,
-      [employee_id, entry_date, status, note||null, updated_by||null]
+       DO UPDATE SET status=$3, note=CASE WHEN $6 THEN $4 ELSE schedule_entries.note END, updated_by=$5, updated_at=NOW() RETURNING *`,
+      [employee_id, entry_date, status, note||null, updated_by||null, noteGiven]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -869,7 +872,7 @@ app.put('/api/schedule/bulk', requireAuth, async (req, res) => {
       `INSERT INTO schedule_entries (employee_id, entry_date, status, note, updated_at)
        VALUES ${vals.join(',')}
        ON CONFLICT (employee_id, entry_date)
-       DO UPDATE SET status=EXCLUDED.status, note=EXCLUDED.note, updated_at=NOW()`,
+       DO UPDATE SET status=EXCLUDED.status, note=COALESCE(EXCLUDED.note, schedule_entries.note), updated_at=NOW()`,
       params
     );
     res.json({ ok: true, count: entries.length });
