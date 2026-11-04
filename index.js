@@ -1180,14 +1180,26 @@ app.put('/api/salary', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Немає доступу до цього відділу' });
     if (req.user.only_employee_id && req.user.only_employee_id !== parseInt(employee_id))
       return res.status(403).json({ error: 'Немає доступу до цього співробітника' });
+    // ЧАСТКОВЕ ОНОВЛЕННЯ: якщо поле не передано (undefined) — лишаємо те, що вже
+    // збережено, а не скидаємо. Раніше збереження лише плану/обороту (поле в
+    // «Планах») стирало галочки Середній чек/Дзвінки/Аппрув і ручну доплату.
+    const prev = (await q(
+      `SELECT * FROM salary_calc WHERE employee_id=$1 AND calc_year=$2 AND calc_month=$3`,
+      [employee_id, calc_year, calc_month]))[0] || {};
+    const keep = (v, old, dflt) => (v === undefined ? (old !== undefined && old !== null ? old : dflt) : v);
+    const boolKeep = (v, old) => (v === undefined ? old === true : v === true);
     const rows = await q(
       `INSERT INTO salary_calc (employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct, worked_days, senior_bonus, penalty, note, bonus_manual, avg_check_ok, calls_ok, approval_ok, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
        ON CONFLICT (employee_id, calc_year, calc_month)
        DO UPDATE SET plan_amount=$4, fact_amount=$5, returns_pct=$6, worked_days=$7, senior_bonus=$8, penalty=$9, note=$10, bonus_manual=$11, avg_check_ok=$12, calls_ok=$13, approval_ok=$14, updated_at=NOW()
        RETURNING *`,
-      [employee_id, calc_year, calc_month, plan_amount, fact_amount, returns_pct||0, worked_days||0, senior_bonus||0, penalty||0, note||null, bonus_manual||0,
-       avg_check_ok===true, calls_ok===true, approval_ok===true]
+      [employee_id, calc_year, calc_month,
+       keep(plan_amount, prev.plan_amount, 0), keep(fact_amount, prev.fact_amount, 0),
+       keep(returns_pct, prev.returns_pct, 0) || 0, keep(worked_days, prev.worked_days, 0) || 0,
+       keep(senior_bonus, prev.senior_bonus, 0) || 0, keep(penalty, prev.penalty, 0) || 0,
+       keep(note, prev.note, null) || null, keep(bonus_manual, prev.bonus_manual, 0) || 0,
+       boolKeep(avg_check_ok, prev.avg_check_ok), boolKeep(calls_ok, prev.calls_ok), boolKeep(approval_ok, prev.approval_ok)]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
