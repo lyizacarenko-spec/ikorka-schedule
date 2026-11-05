@@ -2444,9 +2444,9 @@ function computeHotPeriod(entries, per, isInsta, ym) {
   const bonus    = parseFloat(p.bonus)   || 0;
   const penalty  = parseFloat(p.penalty) || 0;
 
-  const sA998  = parseFloat(p.sum_a998)  || 0;
-  const sA975  = parseFloat(p.sum_a975)  || 0;
-  const sA1149 = parseFloat(p.sum_a1149) || 0;
+  const sA998  = 0; // прибрано: акції 998/975/1149 — у загальній сумі
+  const sA975  = 0;
+  const sA1149 = 0; // прибрано: акції 998/975/1149 — у загальній сумі
 
   const actPct = srch >= HOT_SRCH_LIMIT ? HOT_PCT_ACTION_HI : HOT_PCT_ACTION_LO;
   const pastaOff = !!ym && ym >= HOT_PASTA_OFF_FROM_YM;
