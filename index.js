@@ -145,7 +145,8 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
     returnPenalty = Math.round((bonus1 + bonus2) * retExcess / 100 * 100) / 100;
   }
 
-  const bonusManual = parseFloat(s.bonus_manual) || 0;
+  // «Доплата старш. мен.» у картці зберігається як senior_bonus — теж входить у ручну доплату
+  const bonusManual = (parseFloat(s.bonus_manual) || 0) + (parseFloat(s.senior_bonus) || 0);
   const manualPenalty = parseFloat(s.penalty) || 0;
 
   const total = base + bonus1 + bonus2 - returnPenalty - manualPenalty + bonusManual + overtimeBonus;
