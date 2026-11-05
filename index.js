@@ -1188,7 +1188,7 @@ app.get('/api/employees/:id/grade-suggest', async (req, res) => {
     let y = parseInt(mm[1]), m = parseInt(mm[2]);
     const months = [];
     for (let i = 0; i < 2; i++) { m--; if (m < 1) { m = 12; y--; } months.push([y, m]); }
-    const emp = (await q('SELECT level FROM employees WHERE id=$1', [id]))[0];
+    const emp = (await q('SELECT level, start_date FROM employees WHERE id=$1', [id]))[0];
     if (!emp) return res.status(404).json({ error: 'not found' });
     const out = [];
     for (const [yy, mo] of months) {
@@ -1198,6 +1198,12 @@ app.get('/api/employees/:id/grade-suggest', async (req, res) => {
       out.push({ ym: `${yy}-${String(mo).padStart(2, '0')}`, plan, fact, pct: plan > 0 ? Math.round(fact / plan * 1000) / 10 : null });
     }
     const have = out.filter(o => o.pct != null);
+    // Новачок: з 2-го місяця грейд — за результатом 1-го місяця (док. розд. 8)
+    const sd = emp.start_date ? String(emp.start_date instanceof Date ? emp.start_date.toISOString() : emp.start_date).slice(0, 7) : '';
+    if (sd && sd === out[0].ym && have.length >= 1 && have[0].ym === out[0].ym) {
+      const p1 = have[0].pct;
+      return res.json({ months: out, avg: p1, current: emp.level, suggested: p1 >= 110 ? 'top' : p1 >= 80 ? 'mid' : 'jun', reason: `Перший місяць роботи: ${p1}% — грейд за результатом 1-го місяця` });
+    }
     if (have.length < 2) return res.json({ months: out, current: emp.level, suggested: null, reason: 'Немає даних плану/факту за 2 попередні місяці' });
     const avg = Math.round((have[0].pct + have[1].pct) / 2 * 10) / 10;
     const byAvg = avg >= 110 ? 'top' : avg >= 80 ? 'mid' : 'jun';
