@@ -1178,6 +1178,43 @@ app.get('/api/stats', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Підказка грейду РЗПК за 2 попередні місяці (док. розд. 2) ──
+app.get('/api/employees/:id/grade-suggest', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const ym = String(req.query.ym || '');
+    const mm = ym.match(/^(\d{4})-(\d{2})$/);
+    if (!mm) return res.status(400).json({ error: 'ym=YYYY-MM' });
+    let y = parseInt(mm[1]), m = parseInt(mm[2]);
+    const months = [];
+    for (let i = 0; i < 2; i++) { m--; if (m < 1) { m = 12; y--; } months.push([y, m]); }
+    const emp = (await q('SELECT level FROM employees WHERE id=$1', [id]))[0];
+    if (!emp) return res.status(404).json({ error: 'not found' });
+    const out = [];
+    for (const [yy, mo] of months) {
+      const r = (await q('SELECT plan_amount, fact_amount FROM salary_calc WHERE employee_id=$1 AND calc_year=$2 AND calc_month=$3', [id, yy, mo]))[0];
+      const plan = r ? parseFloat(r.plan_amount) || 0 : 0;
+      const fact = r ? parseFloat(r.fact_amount) || 0 : 0;
+      out.push({ ym: `${yy}-${String(mo).padStart(2, '0')}`, plan, fact, pct: plan > 0 ? Math.round(fact / plan * 1000) / 10 : null });
+    }
+    const have = out.filter(o => o.pct != null);
+    if (have.length < 2) return res.json({ months: out, current: emp.level, suggested: null, reason: 'Немає даних плану/факту за 2 попередні місяці' });
+    const avg = Math.round((have[0].pct + have[1].pct) / 2 * 10) / 10;
+    const byAvg = avg >= 110 ? 'top' : avg >= 80 ? 'mid' : 'jun';
+    const rank = { jun: 0, mid: 1, top: 2 };
+    const cur = rank[emp.level] != null ? emp.level : null;
+    let suggested = byAvg, reason = `Середнє за 2 міс.: ${avg}%`;
+    if (cur && rank[byAvg] < rank[cur]) {
+      const floor = cur === 'top' ? 110 : 80;
+      if (!have.every(o => o.pct < floor)) {
+        suggested = cur;
+        reason += `. Пониження — лише якщо обидва місяці нижче ${floor}%, тут ні — грейд лишається`;
+      }
+    }
+    res.json({ months: out, avg, current: emp.level, suggested, reason });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── SALARY ───────────────────────────────────────────
 app.get('/api/salary', async (req, res) => {
   try {
