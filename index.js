@@ -89,9 +89,10 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
   const approvalOk = !!s.approval_ok;
   const indicatorsCount = (avgCheckOk ? 1 : 0) + (callsOk ? 1 : 0) + (approvalOk ? 1 : 0);
 
-  const plan = parseFloat(s.plan_amount) || 0;
+  const planFull = parseFloat(s.plan_amount) || 0;
+  let plan = planFull;
   const fact = parseFloat(s.fact_amount) || 0;
-  const pct = plan > 0 ? (fact / plan * 100) : 0;
+  let pct = plan > 0 ? (fact / plan * 100) : 0;
 
   const curYm = o.curYm || '';
   const useGradeScheme = curYm >= RZPK_RETAIL_GRADE_CUTOVER_YM;
@@ -117,8 +118,13 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
     // показники/план рахуємо за найнижчою (Джун) шкалою — спрощений період адаптації
     base = worked >= targetDays ? 20000 : Math.round(20000 * worked / targetDays);
     grade = 'jun';
-    bonus1 = RETAIL_BONUS1_TABLE.jun[indicatorsCount] || 0;
-    bonus2 = retailBonus2ForGrade('jun', pct, plan, fact);
+    // Неповний 1-й місяць (док. розд. 8): план і обидва бонуси — пропорційно
+    // змінам: сума ÷ 22 × відпрацьовані зміни; % виконання — від перерахованого плану.
+    const prorate = Math.min(1, worked / targetDays);
+    plan = Math.round(planFull * prorate * 100) / 100;
+    pct = plan > 0 ? (fact / plan * 100) : 0;
+    bonus1 = Math.round((RETAIL_BONUS1_TABLE.jun[indicatorsCount] || 0) * prorate * 100) / 100;
+    bonus2 = Math.round(retailBonus2ForGrade('jun', pct, plan, fact) * prorate * 100) / 100;
     schemeLabel = 'retail_v2_newcomer';
   } else {
     grade = ['jun', 'mid', 'top'].includes(o.level) ? o.level : 'jun';
@@ -328,6 +334,8 @@ const HOT_PCT_OFFICE2   = 0.05;  // ОФІС 2 — відмови + недзві
 const HOT_PCT_ACTION_HI = 0.025; // Акція 230, СРЧ >= 1000
 const HOT_PCT_ACTION_LO = 0.02;  // Акція 230, СРЧ < 1000
 const HOT_SRCH_LIMIT    = 1000;  // поріг СРЧ для підвищеного %
+const HOT_PCT_BIG       = 0.02;  // великі акції (998 / 975 / 1149) — по 2%
+const HOT_PASTA_OFF_FROM_YM = '2026-11'; // з листопада 2026 паста 2% більше не нараховується
 // години робочих статусів (для підрахунку понаднормових)
 const STATUS_HOURS = {'10-18':8,'11-18':7,'10-17':7,'9:30-17:30':8,'9-17':8,'9-18':9,
   '9-19':10,'9-19:30':10.5,'10-19':9,'8:30-16:30':8,'удаленка':8,'запізн':7,'відробіт':8};
@@ -989,6 +997,12 @@ pool.query(`CREATE TABLE IF NOT EXISTS grade_history (
 // Команда старшого менеджера в РЗПК: окреме поле (НЕ team — воно впливає на формули ЗП)
 pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS squad_leader_id INT`)
   .catch(e => console.error('squad_leader_id:', e.message));
+// Гарячі: суми по великих акціях (998 / 975 / 1149) — по 2%
+pool.query(`ALTER TABLE salary_period
+  ADD COLUMN IF NOT EXISTS sum_a998 NUMERIC DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS sum_a975 NUMERIC DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS sum_a1149 NUMERIC DEFAULT 0`)
+  .catch(e => console.error('salary_period alter:', e.message));
 function realYmKyiv() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kiev', year: 'numeric', month: '2-digit' }).format(new Date());
 }
@@ -2370,7 +2384,7 @@ function hotShiftHours(status) {
   return 8;
 }
 
-function computeHotPeriod(entries, per, isInsta) {
+function computeHotPeriod(entries, per, isInsta, ym) {
   // зміни і понаднормові години з графіка
   let shifts = 0, extraHours = 0;
   (entries || []).forEach(e => {
@@ -2393,18 +2407,29 @@ function computeHotPeriod(entries, per, isInsta) {
   const bonus    = parseFloat(p.bonus)   || 0;
   const penalty  = parseFloat(p.penalty) || 0;
 
+  const sA998  = parseFloat(p.sum_a998)  || 0;
+  const sA975  = parseFloat(p.sum_a975)  || 0;
+  const sA1149 = parseFloat(p.sum_a1149) || 0;
+
   const actPct = srch >= HOT_SRCH_LIMIT ? HOT_PCT_ACTION_HI : HOT_PCT_ACTION_LO;
+  const pastaOff = !!ym && ym >= HOT_PASTA_OFF_FROM_YM;
   const payOffice  = sOffice  * HOT_PCT_OFFICE;
-  const payPasta   = sPasta   * HOT_PCT_PASTA;
+  const payPasta   = pastaOff ? 0 : sPasta * HOT_PCT_PASTA;
   const payOffice2 = sOffice2 * HOT_PCT_OFFICE2;
   const payAction  = sAction  * actPct;
+  const pay998  = sA998  * HOT_PCT_BIG;
+  const pay975  = sA975  * HOT_PCT_BIG;
+  const pay1149 = sA1149 * HOT_PCT_BIG;
 
-  const total = rate + payOffice + payPasta + payOffice2 + payAction + bonus - penalty;
+  const total = rate + payOffice + payPasta + payOffice2 + payAction + pay998 + pay975 + pay1149 + bonus - penalty;
 
   return {
     shifts, extra_hours: extraHours, rate, is_insta: isInsta,
     sum_office: sOffice, pay_office: payOffice,
-    sum_pasta: sPasta, pay_pasta: payPasta,
+    sum_pasta: sPasta, pay_pasta: payPasta, pasta_off: pastaOff,
+    sum_a998: sA998, pay_a998: pay998,
+    sum_a975: sA975, pay_a975: pay975,
+    sum_a1149: sA1149, pay_a1149: pay1149,
     sum_office2: sOffice2, pay_office2: payOffice2,
     sum_action: sAction, srch_action: srch,
     action_pct: actPct * 100, pay_action: payAction,
@@ -2599,6 +2624,9 @@ function buildBreakdown(r) {
       push('Паста % (1-14)', p1.pay_pasta);
       push('ОФІС2 % (1-14)', p1.pay_office2);
       push('Акція230 % (1-14)', p1.pay_action);
+      push('Акція 998 % (1-14)', p1.pay_a998);
+      push('Акція 975 % (1-14)', p1.pay_a975);
+      push('Акція 1149 % (1-14)', p1.pay_a1149);
       push('Доплата (1-14)', p1.bonus);
       push('Штраф (1-14)', p1.penalty ? -p1.penalty : 0);
       push('Ставка (15-кінець)', p2.rate);
@@ -2606,6 +2634,9 @@ function buildBreakdown(r) {
       push('Паста % (15-кінець)', p2.pay_pasta);
       push('ОФІС2 % (15-кінець)', p2.pay_office2);
       push('Акція230 % (15-кінець)', p2.pay_action);
+      push('Акція 998 % (15-кінець)', p2.pay_a998);
+      push('Акція 975 % (15-кінець)', p2.pay_a975);
+      push('Акція 1149 % (15-кінець)', p2.pay_a1149);
       push('Доплата (15-кінець)', p2.bonus);
       push('Штраф (15-кінець)', p2.penalty ? -p2.penalty : 0);
       break;
@@ -2886,18 +2917,22 @@ app.put('/api/salary-period', requireAuth, async (req, res) => {
     if (!req.user.can_salary) return res.status(403).json({ error: 'Немає доступу до ЗП' });
     const { employee_id, calc_year, calc_month, period_no,
             sum_office, sum_pasta, sum_office2, sum_action, srch_action,
+            sum_a998, sum_a975, sum_a1149,
             bonus, penalty, note } = req.body;
     const rows = await q(
       `INSERT INTO salary_period (employee_id, calc_year, calc_month, period_no,
-         sum_office, sum_pasta, sum_office2, sum_action, srch_action, bonus, penalty, note, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+         sum_office, sum_pasta, sum_office2, sum_action, srch_action, bonus, penalty, note,
+         sum_a998, sum_a975, sum_a1149, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
        ON CONFLICT (employee_id, calc_year, calc_month, period_no)
        DO UPDATE SET sum_office=$5, sum_pasta=$6, sum_office2=$7, sum_action=$8,
-                     srch_action=$9, bonus=$10, penalty=$11, note=$12, updated_at=NOW()
+                     srch_action=$9, bonus=$10, penalty=$11, note=$12,
+                     sum_a998=$13, sum_a975=$14, sum_a1149=$15, updated_at=NOW()
        RETURNING *`,
       [employee_id, calc_year, calc_month, period_no,
        sum_office||0, sum_pasta||0, sum_office2||0, sum_action||0, srch_action||0,
-       bonus||0, penalty||0, note||null]
+       bonus||0, penalty||0, note||null,
+       sum_a998||0, sum_a975||0, sum_a1149||0]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2934,8 +2969,8 @@ app.get('/api/hot-calc', requireAuth, async (req, res) => {
     const r1 = periodRange(y, m, 1), r2 = periodRange(y, m, 2);
     const ent1 = monthEntries.filter(e => e.entry_date >= r1.from && e.entry_date <= r1.to);
     const ent2 = monthEntries.filter(e => e.entry_date >= r2.from && e.entry_date <= r2.to);
-    const c1 = computeHotPeriod(ent1, ps[1], isInsta);
-    const c2 = computeHotPeriod(ent2, ps[2], isInsta);
+    const c1 = computeHotPeriod(ent1, ps[1], isInsta, `${y}-${String(m).padStart(2,'0')}`);
+    const c2 = computeHotPeriod(ent2, ps[2], isInsta, `${y}-${String(m).padStart(2,'0')}`);
     res.json({ period1: c1, period2: c2 });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -3396,8 +3431,8 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         const r1 = periodRange(y, m, 1), r2 = periodRange(y, m, 2);
         const ent1 = monthEntries.filter(e => e.entry_date >= r1.from && e.entry_date <= r1.to);
         const ent2 = monthEntries.filter(e => e.entry_date >= r2.from && e.entry_date <= r2.to);
-        const c1 = computeHotPeriod(ent1, ps[1], isInsta);
-        const c2 = computeHotPeriod(ent2, ps[2], isInsta);
+        const c1 = computeHotPeriod(ent1, ps[1], isInsta, `${y}-${String(m).padStart(2,'0')}`);
+        const c2 = computeHotPeriod(ent2, ps[2], isInsta, `${y}-${String(m).padStart(2,'0')}`);
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
         const total = c1.total + c2.total + adjTotal;
