@@ -1841,6 +1841,13 @@ function fasovkaDayAmount(r) {
   return (r.glass||0)*1 + (r.plastic||0)*1.5;
 }
 
+// Гібрид «оклад + упаковка» (замість фасовки): Усачов Сергій (Вінниця, id=234) —
+// фіксований оклад (повний, незалежно від днів) + відрядна УПАКОВКА (6/7/8/9 грн).
+const WAREHOUSE_PACK_HYBRID_IDS = [234];
+function hybridVarAmount(empId, r) {
+  return WAREHOUSE_PACK_HYBRID_IDS.includes(empId) ? warehouseDayAmount(r).pack : fasovkaDayAmount(r);
+}
+
 // ── Ставка погодинних схем (hourly / hourly_fixed) на КОНКРЕТНИЙ день ──
 // ПОДЕННИЙ розподіл rate_change_date/prev_base_rate — на відміну від
 // CASE у основному SELECT s.base_rate (used для fixed_rate), який перемикає
@@ -2644,7 +2651,7 @@ function buildBreakdown(r) {
       break;
     case 'warehouse_hybrid':
       push('Фікс (оклад ± переробка)', r.fix_total);
-      push('Фасовка (скло/пластик)', r.piece_total);
+      push(WAREHOUSE_PACK_HYBRID_IDS.includes(r.employee_id) ? 'Упаковка' : 'Фасовка (скло/пластик)', r.piece_total);
       break;
     case 'piece_warehouse':
       push('Упаковка', r.pack_total);
@@ -3382,7 +3389,7 @@ async function computeFinanceRows(y, m, dept) {
 const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m, [], emp.start_date, emp.id); // корегування додаємо нижче окремо        // фасовка за місяць (тільки скло/пластик)
         const list = whByEmp[emp.id] || [];
         let fasTotal = 0, fasDays = 0;
-        list.forEach(r => { const a = fasovkaDayAmount(r); if (a > 0) { fasTotal += a; fasDays += 1; } });
+        list.forEach(r => { const a = hybridVarAmount(emp.id, r); if (a > 0) { fasTotal += a; fasDays += 1; } });
         // корегування
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
@@ -4305,7 +4312,8 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
       const key = `${r.employee_id}_${day}`;
       // для гібрида (начальник складу) — лише фасовка; для відрядників — повна сума дня
       if (schemeById[r.employee_id] === 'warehouse_hybrid') {
-        addComp(key, { pack: 0, fasovka: fasovkaDayAmount(r), exit: 0, hourPay: 0, hours: 0 });
+        if (WAREHOUSE_PACK_HYBRID_IDS.includes(r.employee_id)) addComp(key, { pack: warehouseDayAmount(r).pack, fasovka: 0, exit: 0, hourPay: 0, hours: 0 });
+        else addComp(key, { pack: 0, fasovka: fasovkaDayAmount(r), exit: 0, hourPay: 0, hours: 0 });
       } else {
         const calc = warehouseDayAmount(r);
         addComp(key, { pack: calc.pack, fasovka: calc.fasovka, exit: calc.exit, hourPay: 0, hours: 0 });
@@ -4362,6 +4370,7 @@ app.get('/api/finance/warehouse-weeks', requireFinance, async (req, res) => {
         push('Фасовка', comp.fasovka);
         push('Вихід', comp.exit);
       } else if (scheme === 'warehouse_hybrid') {
+        push('Упаковка', comp.pack);
         push('Фасовка', comp.fasovka);
       } else if (scheme === 'hourly' || scheme === 'hourly_fixed') {
         push(`Години × ставка (${comp.hours}г)`, comp.hourPay);
