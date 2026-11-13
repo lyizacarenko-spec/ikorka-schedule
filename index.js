@@ -769,7 +769,10 @@ app.patch('/api/employees/:id', async (req, res) => {
         const realYm = realYmKyiv();
         const ym = /^\d{4}-\d{2}$/.test(req.body.ym || '') ? req.body.ym : realYm;
         if (ym < realYm) {
-          return res.status(403).json({ error: 'Минулий місяць закрито — грейд за нього змінити не можна' });
+          const un = await q(`SELECT 1 FROM grade_unlock WHERE ym=$1`, [ym]);
+          if (!un.length) {
+            return res.status(403).json({ error: 'Минулий місяць закрито — грейд за нього змінити не можна' });
+          }
         }
         if (req.body.confirm !== true) {
           return res.status(409).json({ error: 'Потрібне підтвердження зміни грейду', needConfirm: true });
@@ -779,11 +782,25 @@ app.patch('/api/employees/:id', async (req, res) => {
           await q(`INSERT INTO grade_history (employee_id, effective_ym, level, set_by) VALUES ($1,'0000-00',$2,'baseline')
                    ON CONFLICT DO NOTHING`, [req.params.id, cur[0].level]);
         }
+        // Виправлення МИНУЛОГО (відкритого) місяця не має «протікати» в наступні:
+        // фіксуємо грейд наступного місяця таким, яким він був до виправлення.
+        if (ym < realYm) {
+          const [yy, mm] = ym.split('-').map(Number);
+          const nextYm = mm === 12 ? `${yy + 1}-01` : `${yy}-${String(mm + 1).padStart(2, '0')}`;
+          const hasNext = await q(`SELECT 1 FROM grade_history WHERE employee_id=$1 AND effective_ym=$2`, [req.params.id, nextYm]);
+          if (!hasNext.length) {
+            const lv = await q(`SELECT ${gradeAtSql('$2')} AS lvl FROM employees e WHERE e.id=$1`, [req.params.id, nextYm]);
+            if (lv.length) {
+              await q(`INSERT INTO grade_history (employee_id, effective_ym, level, set_by) VALUES ($1,$2,$3,$4)
+                       ON CONFLICT DO NOTHING`, [req.params.id, nextYm, lv[0].lvl, 'auto-keep']);
+            }
+          }
+        }
         await q(`INSERT INTO grade_history (employee_id, effective_ym, level, set_by) VALUES ($1,$2,$3,$4)
                  ON CONFLICT (employee_id, effective_ym) DO UPDATE SET level=$3, set_by=$4, set_at=NOW()`,
                 [req.params.id, ym, level, (req.user && (req.user.login || req.user.full_name)) || null]);
         // employees.level = грейд на ПОТОЧНИЙ місяць (для екранів без вибору місяця)
-        if (ym > realYm) level = null;
+        if (ym !== realYm) level = null;
       }
     }
     const rows = await q(
@@ -995,6 +1012,9 @@ pool.query(`CREATE TABLE IF NOT EXISTS grade_history (
   set_at TIMESTAMPTZ DEFAULT NOW(),
   PRIMARY KEY (employee_id, effective_ym)
 )`).catch(e => console.error('grade_history:', e.message));
+// Місяці, за які тимчасово дозволено змінювати грейд (за замовчуванням минулі закриті)
+pool.query(`CREATE TABLE IF NOT EXISTS grade_unlock (ym TEXT PRIMARY KEY, opened_at TIMESTAMPTZ DEFAULT NOW())`)
+  .catch(e => console.error('grade_unlock:', e.message));
 // Команда старшого менеджера в РЗПК: окреме поле (НЕ team — воно впливає на формули ЗП)
 pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS squad_leader_id INT`)
   .catch(e => console.error('squad_leader_id:', e.message));
