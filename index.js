@@ -3537,7 +3537,13 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
       // vin_op (Вінниця — Відділ продажу) рахується тими ж формулами, що й
       // РЗПК-Роздріб Дніпра — по аналогії, за проханням користувача
       if (useNewForThisEmp && (emp.dept_code === 'rzpk' || emp.dept_code === 'vin_op')) {
-        const { worked: workedGraphNew } = countWorkAndTrain(schedByEmp[emp.id] || []);
+        // Тімліди: оклад рахується за днями, які ВИДНО в графіку (збережені + дефолтні
+        // 10-19 для порожніх днів). Інакше людина без жодного збереженого робочого дня
+        // отримувала 0 змін, хоча графік показує повний місяць.
+        const { worked: workedGraphNew } = countWorkAndTrain(
+          emp.role === 'teamlead'
+            ? buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date)
+            : (schedByEmp[emp.id] || []));
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
         let calc = null;
