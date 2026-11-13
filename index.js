@@ -121,7 +121,8 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
     // Неповний 1-й місяць (док. розд. 8): план і обидва бонуси — пропорційно
     // змінам: сума ÷ 22 × відпрацьовані зміни; % виконання — від перерахованого плану.
     const prorate = Math.min(1, worked / targetDays);
-    plan = Math.round(planFull * prorate * 100) / 100;
+    // Індивідуальний план новачка вводиться вже на його фактичні дні — не зменшуємо вдруге.
+    plan = planFull;
     pct = plan > 0 ? (fact / plan * 100) : 0;
     bonus1 = Math.round((RETAIL_BONUS1_TABLE.jun[indicatorsCount] || 0) * prorate * 100) / 100;
     bonus2 = Math.round(retailBonus2ForGrade('jun', pct, plan, fact) * prorate * 100) / 100;
