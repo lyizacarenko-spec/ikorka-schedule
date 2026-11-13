@@ -150,7 +150,12 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
   const bonusManual = (parseFloat(s.bonus_manual) || 0) + (parseFloat(s.senior_bonus) || 0);
   const manualPenalty = parseFloat(s.penalty) || 0;
 
-  const total = base + bonus1 + bonus2 - returnPenalty - manualPenalty + bonusManual + overtimeBonus;
+  // Дні навчання (статус 'навч'): НЕ зміни менеджера, оплачуються окремо по TRAIN_DAY_PAY
+  // за кожен день (з жовтня 2026, нова схема).
+  const trainDays = useGradeScheme ? (parseInt(o.trainDays) || 0) : 0;
+  const trainPay = trainDays * TRAIN_DAY_PAY;
+
+  const total = base + bonus1 + bonus2 - returnPenalty - manualPenalty + bonusManual + overtimeBonus + trainPay;
 
   let payout1 = Math.round(base / 2);
   if (payout1 > total) payout1 = Math.max(0, total);
@@ -159,6 +164,7 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
   return {
     scheme_type: schemeLabel, grade, base_rate: base, worked_days: worked, target_days: targetDays,
     overtime_days: overtimeDays, overtime_bonus: overtimeBonus,
+    train_days: trainDays, train_pay: trainPay,
     avg_check_ok: avgCheckOk, calls_ok: callsOk, approval_ok: approvalOk, indicators_count: indicatorsCount, bonus1,
     plan, fact, pct: Math.round(pct * 10) / 10, bonus2,
     returns_pct: returnsPct, return_penalty: returnPenalty,
@@ -2775,6 +2781,7 @@ function buildBreakdown(r) {
       push('Доплата', r.bonus_manual);
       push('Штраф', r.penalty ? -r.penalty : 0);
       push(`Переробка (${r.overtime_days} дн.)`, r.overtime_bonus);
+      if (r.train_pay) push(`Навчання (${r.train_days} дн. × ${TRAIN_DAY_PAY})`, r.train_pay);
       break;
     case 'teamlead_retail':
       push('Ставка', r.base_rate);
@@ -3543,7 +3550,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         // Тімліди: оклад рахується за днями, які ВИДНО в графіку (збережені + дефолтні
         // 10-19 для порожніх днів). Інакше людина без жодного збереженого робочого дня
         // отримувала 0 змін, хоча графік показує повний місяць.
-        const { worked: workedGraphNew } = countWorkAndTrain(
+        const { worked: workedGraphNew, train: trainGraphNew } = countWorkAndTrain(
           emp.role === 'teamlead'
             ? buildMonthEntries(y, m, schedByEmp[emp.id], emp.dept_code, emp.name, emp.start_date)
             : (schedByEmp[emp.id] || []));
@@ -3563,6 +3570,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
             level: emp.level,
             curYm,
             isFirstMonth: isFirstMonthByStartDate(emp.start_date, y, m),
+            trainDays: trainGraphNew,
           });
         }
         if (calc) {
