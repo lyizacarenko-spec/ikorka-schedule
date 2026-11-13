@@ -171,7 +171,8 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
 function computeTeamleadRetailSalary(row, workedGraph) {
   const r = row || {};
   const worked = workedGraph != null ? workedGraph : 22;
-  const base = worked >= 22 ? 30000 : Math.round(30000 * worked / 22);
+  // Тімлід роздробу: ставка завжди повна 30 000 (пн–пт), без пропорції за днями
+  const base = 30000;
   const planTarget = parseFloat(r.plan_target) || 0;
   const planFact = parseFloat(r.plan_fact) || 0;
   const pct = planTarget > 0 ? (planFact / planTarget * 100) : 0;
@@ -198,7 +199,8 @@ function computeTeamleadRetailSalary(row, workedGraph) {
 function computeTeamleadMoSalary(row, workedGraph) {
   const r = row || {};
   const worked = workedGraph != null ? workedGraph : 22;
-  const base = worked >= 22 ? 35000 : Math.round(35000 * worked / 22);
+  // Тімлід МО/Ресейл: ставка завжди повна 35 000 (пн–пт), без пропорції за днями
+  const base = 35000;
   const cnt = parseInt(r.returned_clients) || 0;
   let bonus = 0;
   if (cnt >= 35) bonus = 12500;
