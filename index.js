@@ -70,8 +70,9 @@ function retailBonus2ForGrade(grade, pct, plan, fact) {
     return Math.round((base121 + excess * 0.04) * 100) / 100;
   }
   const tiers = RETAIL_BONUS2_TABLE[g] || [];
+  // межі без «дірок»: 79.5% належить до діапазону 70–79, 89.5% — до 80–89 тощо (до 121%)
   for (const [lo, hi, amt] of tiers) {
-    if (pct >= lo && pct <= hi) return amt;
+    if (pct >= lo && pct < hi + 1) return amt;
   }
   return 0;
 }
@@ -126,7 +127,8 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
     // Індивідуальний план новачка вводиться вже на його фактичні дні — не зменшуємо вдруге.
     plan = planFull;
     pct = plan > 0 ? (fact / plan * 100) : 0;
-    bonus1 = Math.round((RETAIL_BONUS1_TABLE.jun[indicatorsCount] || 0) * prorate * 100) / 100;
+    // бонус 1 новачка — по 2000 за показник (шкала Мідл), бонус 2 — шкала Джун (РОП, 13.11.2026)
+    bonus1 = Math.round((RETAIL_BONUS1_TABLE.mid[indicatorsCount] || 0) * prorate * 100) / 100;
     bonus2 = Math.round(retailBonus2ForGrade('jun', pct, plan, fact) * prorate * 100) / 100;
     schemeLabel = 'retail_v2_newcomer';
   } else {
@@ -722,6 +724,14 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     if (dept) { sql += ` AND d.code = $${params.length+1}`; params.push(dept); }
     sql += ' ORDER BY d.id, COALESCE(e.sort_order, 999999), e.name';
     let rows = await q(sql, params);
+    // грейд на ВИБРАНИЙ місяць (історія грейдів), а не лише поточний
+    if (include_month && /^\d{4}-\d{2}$/.test(include_month)) {
+      try {
+        const gl = await q(`SELECT e.id, ${gradeAtSql('$1')} AS lvl FROM employees e`, [include_month]);
+        const gm = {}; gl.forEach(g => { gm[g.id] = g.lvl; });
+        rows.forEach(r => { if (gm[r.id]) r.level = gm[r.id]; });
+      } catch (e) { console.error('grade overlay:', e.message); }
+    }
     // звільнений (fired_date) — видимий до місяця звільнення ВКЛЮЧНО,
     // з наступного місяця приховується (навіть якщо is_active ще не
     // перемкнули на false) — та сама логіка, що й у Фінансах
