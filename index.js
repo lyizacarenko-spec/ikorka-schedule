@@ -76,6 +76,8 @@ function retailBonus2ForGrade(grade, pct, plan, fact) {
   return 0;
 }
 
+// Оплата днів навчання у новій схемі роздробу: 100 грн за день зі статусом 'навч' (РОП, 13.11.2026)
+const RETAIL_V2_PAY_TRAIN_DAYS = true;
 function computeRetailV2Salary(salRow, workedGraph, opts) {
   const s = salRow || {};
   const o = opts || {};
@@ -152,7 +154,7 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
 
   // Дні навчання (статус 'навч'): НЕ зміни менеджера, оплачуються окремо по TRAIN_DAY_PAY
   // за кожен день (з жовтня 2026, нова схема).
-  const trainDays = useGradeScheme ? (parseInt(o.trainDays) || 0) : 0;
+  const trainDays = (RETAIL_V2_PAY_TRAIN_DAYS && useGradeScheme) ? (parseInt(o.trainDays) || 0) : 0;
   const trainPay = trainDays * TRAIN_DAY_PAY;
 
   const total = base + bonus1 + bonus2 - returnPenalty - manualPenalty + bonusManual + overtimeBonus + trainPay;
