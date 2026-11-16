@@ -125,7 +125,9 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
     // змінам: сума ÷ 22 × відпрацьовані зміни; % виконання — від перерахованого плану.
     const prorate = Math.min(1, worked / targetDays);
     // Індивідуальний план новачка вводиться вже на його фактичні дні — не зменшуємо вдруге.
-    plan = planFull;
+    // Вінниця: план вносять на 22 дні — перераховуємо на відпрацьовані (план ÷ 22 × дні).
+    // Дніпро: план новачка вже на його фактичні дні — вдруге не зменшуємо.
+    plan = o.prorateNewcomerPlan ? Math.round(planFull * prorate) : planFull;
     pct = plan > 0 ? (fact / plan * 100) : 0;
     // бонус 1 новачка — по 2000 за показник (шкала Мідл), бонус 2 — шкала Джун (РОП, 13.11.2026)
     bonus1 = Math.round((RETAIL_BONUS1_TABLE.mid[indicatorsCount] || 0) * prorate * 100) / 100;
@@ -3595,6 +3597,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
             curYm,
             isFirstMonth: isFirstMonthByStartDate(emp.start_date, y, m),
             trainDays: trainGraphNew,
+            prorateNewcomerPlan: emp.dept_code === 'vin_op',
           });
         }
         if (calc) {
