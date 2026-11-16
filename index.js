@@ -1181,7 +1181,16 @@ app.get('/api/stats', async (req, res) => {
           const pamt = parseFloat(planRow?.plan_amount || 0);
           cnt += c; subtotal += c * pamt;
         });
-        planBreakdown[lvl] = { cnt, plan_per_person: cnt ? subtotal / cnt : 0, subtotal };
+        // Якщо в цьому відділі нікого цього рівня в плані нема (напр. усі — новачки цього
+        // місяця, їх у план відділу не рахують) — для підказки плану в картці беремо
+        // ставку плану рівня напряму (default без team, або будь-яку команди)
+        let ppp = cnt ? subtotal / cnt : 0;
+        if (!cnt) {
+          const fb = plans.find(p => p.department_id === dept.id && p.level === lvl && !p.team && parseFloat(p.plan_amount) > 0)
+                  || plans.find(p => p.department_id === dept.id && p.level === lvl && parseFloat(p.plan_amount) > 0);
+          ppp = fb ? parseFloat(fb.plan_amount) : 0;
+        }
+        planBreakdown[lvl] = { cnt, plan_per_person: ppp, subtotal };
         planTotal += subtotal;
       });
 
