@@ -130,8 +130,10 @@ function computeRetailV2Salary(salRow, workedGraph, opts) {
     plan = o.prorateNewcomerPlan ? Math.round(planFull * prorate) : planFull;
     pct = plan > 0 ? (fact / plan * 100) : 0;
     // бонус 1 новачка — по 2000 за показник (шкала Мідл), бонус 2 — шкала Джун (РОП, 13.11.2026)
-    bonus1 = Math.round((RETAIL_BONUS1_TABLE.mid[indicatorsCount] || 0) * prorate * 100) / 100;
-    bonus2 = Math.round(retailBonus2ForGrade('jun', pct, plan, fact) * prorate * 100) / 100;
+    // Вінниця: бонуси фіксовані (не зменшуються за днями) — пропорційні лише ставка і план
+    const bonusK = o.prorateNewcomerPlan ? 1 : prorate;
+    bonus1 = Math.round((RETAIL_BONUS1_TABLE.mid[indicatorsCount] || 0) * bonusK * 100) / 100;
+    bonus2 = Math.round(retailBonus2ForGrade('jun', pct, plan, fact) * bonusK * 100) / 100;
     schemeLabel = 'retail_v2_newcomer';
   } else {
     grade = ['jun', 'mid', 'top'].includes(o.level) ? o.level : 'jun';
