@@ -3569,7 +3569,10 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         const adjList = adjByEmp[emp.id] || [];
         const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
         let calc = null;
-        if (emp.team === 'Роздріб' && emp.role === 'teamlead') {
+        // Вінниця (vin_op): усі менеджери/тімліди — за схемою Роздрібу незалежно від поля team
+        // (там є й «Нові співробітники», «Віддалено»); РОП/керівництво — окремо
+        const retailTeam = (emp.dept_code === 'vin_op' && !['rop','head'].includes(emp.role)) ? 'Роздріб' : emp.team;
+        if (retailTeam === 'Роздріб' && emp.role === 'teamlead') {
           calc = computeTeamleadRetailSalary(teamleadRetailByEmp[emp.id], workedGraphNew);
         } else if ((emp.team === 'Малий опт' || emp.team === 'Ресейл') && emp.role === 'teamlead') {
           calc = computeTeamleadMoSalary(teamleadMoByEmp[emp.id], workedGraphNew);
@@ -3577,7 +3580,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
           calc = computeMoManagerSalary(moManagerByEmp[emp.id], workedGraphNew);
         } else if (emp.team === 'Ресейл' && !['rop','head','teamlead'].includes(emp.role)) {
           calc = computeB2bManagerSalary(b2bManagerByEmp[emp.id], workedGraphNew);
-        } else if (emp.team === 'Роздріб' && !['rop','head','teamlead'].includes(emp.role)) {
+        } else if (retailTeam === 'Роздріб' && !['rop','head','teamlead'].includes(emp.role)) {
           calc = computeRetailV2Salary(salByEmp[emp.id], workedGraphNew, {
             level: emp.level,
             curYm,
