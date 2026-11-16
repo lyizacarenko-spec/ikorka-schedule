@@ -337,6 +337,21 @@ function computeB2bManagerSalary(row, workedGraph) {
   };
 }
 
+// ── Лінійні керівники (тімліди/РОП): ставка — на 1-ше і 15-те, ВСІ допки окремо ──
+// payout1 = половина ставки, payout2 = друга половина, bonus_extra = усе, що понад ставку
+// (бонуси, %, переробка, корегування); total не змінюється.
+function splitLeaderPay(obj, base) {
+  const b = Math.round((parseFloat(base) || 0) * 100) / 100;
+  const total = parseFloat(obj.total) || 0;
+  const p1 = Math.min(Math.round(b / 2 * 100) / 100, Math.max(0, total));
+  const rateTotal = Math.max(0, Math.min(b, total));
+  obj.payout1 = p1;
+  obj.payout2 = Math.max(0, Math.round((rateTotal - p1) * 100) / 100);
+  obj.bonus_extra = Math.max(0, Math.round((total - b) * 100) / 100);
+  obj.leader_base = b;
+  obj.advance = obj.payout1; obj.remainder = obj.payout2;
+}
+
 // ── Константи виплат ─────────────────────────────────────────
 const NEW_DAY_BASE      = 15000;  // базова ставка новачка (продажі і відмови) для розрахунку авансу: ставка дня = 15000/22
 const SALES_ADVANCE     = 7000;   // фікс аванс продажів для «старих» (виплата 1)
@@ -3607,6 +3622,10 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
         if (calc) {
           calc.total += adjTotal;
           calc.payout2 = Math.max(0, calc.payout2 + adjTotal);
+          // тімліди: ставка — на 1-ше/15-те, допки окремою колонкою (крім Романенка/Даніелли — свій виняток)
+          if (['teamlead_retail', 'teamlead_mo'].includes(calc.scheme_type) && !BONUS_ON_FIRST_IDS.includes(emp.id)) {
+            splitLeaderPay(calc, calc.base_rate);
+          }
           return {
             employee_id: emp.id, name: emp.name,
             dept_code: emp.dept_code, dept_name: emp.dept_name,
@@ -3637,7 +3656,7 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
             const adjTotal = adjList.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
             const total = rc.total + adjTotal;
             const payout1 = rc.rate / 2;   // аванс = половина ставки (враховує персональну ставку), допки й залишок ставки — у «15-те»
-            return {
+            const ropRow = {
               employee_id: emp.id, name: emp.name,
               dept_code: emp.dept_code, dept_name: emp.dept_name,
               role: effRole, level: emp.level,
@@ -3647,6 +3666,10 @@ const fixCalc = computeFixedRate(fixScheme, monthEntries, salByEmp[emp.id], y, m
               pay_schedule: 'sales',
               advance: payout1, remainder: Math.max(0, total - payout1),
             };
+            // РОП: ставка — на 1-ше/15-те, допки (KPI, план, %, корегування) окремою колонкою
+            // (крім Романенка/Даніелли — для них свій виняток нижче)
+            if (!BONUS_ON_FIRST_IDS.includes(emp.id)) splitLeaderPay(ropRow, rc.rate);
+            return ropRow;
           }
           return {
             employee_id: emp.id, name: emp.name,
@@ -4191,7 +4214,9 @@ app.get('/api/finance', requireFinance, async (req, res) => {
           r.pay1 = r.payout1;
         }
       } else if (r.override1 != null && r.override2 == null && r.total != null && r.pay_schedule !== 'hot') {
-        r.payout2 = Math.max(0, r.total - r.override1 - (r.advance_p1||0) - (r.advance_p2||0));
+        // для лінійних керівників допки окремо — залишок рахуємо лише від ставки
+        const tgtTotal = (r.bonus_extra != null) ? Math.min(r.leader_base, r.total) : r.total;
+        r.payout2 = Math.max(0, tgtTotal - r.override1 - (r.advance_p1||0) - (r.advance_p2||0));
         r.pay2 = r.payout2;
       }
       // чи видано корегування окремо в конверті
